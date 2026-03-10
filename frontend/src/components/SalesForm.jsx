@@ -3,14 +3,14 @@ import toast from 'react-hot-toast';
 import { salesApi } from '../services/salesApi';
 import { Save, X } from 'lucide-react';
 
-const SalesForm = ({ onSuccess, onCancel }) => {
+const SalesForm = ({ onSuccess, onCancel, initialData }) => {
   const [formData, setFormData] = useState({
-    sale_date: new Date().toISOString().split('T')[0],
-    product_name: '',
-    quantity: 1,
-    purchase_price: '',
-    sale_price: '',
-    seller: ''
+    sale_date: initialData?.sale_date || new Date().toISOString().split('T')[0],
+    product_name: initialData?.product_name || '',
+    quantity: initialData?.quantity || 1,
+    purchase_price: initialData?.purchase_price || '',
+    sale_price: initialData?.sale_price || '',
+    seller: initialData?.seller || ''
   });
   
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -44,10 +44,15 @@ const SalesForm = ({ onSuccess, onCancel }) => {
         sale_price: parseFloat(formData.sale_price),
       };
 
-      // Call real API
-      await salesApi.createSale(payload);
+      // Call real API - Choose between CREATE or UPDATE based on initialData
+      if (initialData && initialData.id) {
+        await salesApi.updateSale(initialData.id, payload);
+        toast.success('Cambios guardados exitosamente');
+      } else {
+        await salesApi.createSale(payload);
+        toast.success('Venta manual registrada exitosamente');
+      }
       
-      toast.success('Venta manual registrada exitosamente');
       onSuccess(); // Trigger parent refresh and close form
       
     } catch (error) {
@@ -62,8 +67,12 @@ const SalesForm = ({ onSuccess, onCancel }) => {
     <div className="bg-white/80 backdrop-blur-md p-6 sm:p-8 rounded-2xl shadow-sm border border-gray-100/80 mb-6 transition-all">
       <div className="flex justify-between items-center mb-6 pb-4 border-b border-gray-100">
         <div>
-          <h3 className="text-lg font-bold text-gray-800">Registrar Venta Manual</h3>
-          <p className="text-xs text-gray-500 mt-1">Ingresa los detalles financieros. El cálculo de utilidad será automático.</p>
+          <h3 className="text-lg font-bold text-gray-800">
+            {initialData ? 'Editar Venta' : 'Registrar Venta Manual'}
+          </h3>
+          <p className="text-xs text-gray-500 mt-1">
+            {initialData ? 'Actualiza los detalles financieros del registro.' : 'Ingresa los detalles financieros. El cálculo de utilidad será automático.'}
+          </p>
         </div>
         <button onClick={onCancel} className="text-gray-400 hover:text-red-500 hover:bg-red-50 p-2 rounded-xl transition-all active:scale-95">
           <X className="w-5 h-5" />
@@ -195,7 +204,7 @@ const SalesForm = ({ onSuccess, onCancel }) => {
              ) : (
                <Save className="w-4 h-4" />
              )}
-            {isSubmitting ? 'Procesando...' : 'Confirmar Venta'}
+            {isSubmitting ? 'Procesando...' : (initialData ? 'Guardar Cambios' : 'Confirmar Venta')}
           </button>
         </div>
       </form>

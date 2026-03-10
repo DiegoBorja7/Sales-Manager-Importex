@@ -13,8 +13,5 @@ class Sale(Base):
     profit = Column(Numeric(10, 2), nullable=False)
     seller = Column(String, index=True, nullable=True)
     source = Column(String, nullable=False) # 'csv' or 'manual'
+    external_id = Column(String, unique=True, index=True, nullable=True) # E.g., Dropi ID or generated Manual ID
     created_at = Column(DateTime, server_default=text("NOW()"))
-
-    __table_args__ = (
-        UniqueConstraint('sale_date', 'product_name', 'seller', 'quantity', name='uq_sale_duplicate'),
-    )

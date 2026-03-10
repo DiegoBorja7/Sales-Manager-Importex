@@ -50,5 +50,31 @@ export const salesApi = {
       console.error("Error uploading CSV:", error);
       throw error;
     }
+  },
+  
+  /**
+   * Update an existing sale
+   */
+  updateSale: async (id, saleData) => {
+    try {
+      const response = await axios.put(`${API_BASE_URL}/api/sales/${id}`, saleData);
+      return response.data;
+    } catch (error) {
+      console.error("Error updating sale:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Delete a sale
+   */
+  deleteSale: async (id) => {
+    try {
+      const response = await axios.delete(`${API_BASE_URL}/api/sales/${id}`);
+      return response.data;
+    } catch (error) {
+      console.error("Error deleting sale:", error);
+      throw error;
+    }
   }
 };

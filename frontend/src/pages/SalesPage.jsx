@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
 import { salesApi } from '../services/salesApi';
 import SalesTable from '../components/SalesTable';
@@ -10,7 +10,11 @@ const SalesPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [editingSale, setEditingSale] = useState(null); // Tracks the sale being edited
+  
+  const fileInputRef = useRef(null);
 
   // Fetch sales on component mount
   const fetchSales = async () => {
@@ -33,10 +37,99 @@ const SalesPage = () => {
     fetchSales();
   }, []);
 
-  // Handle successful manual record insertion
-  const handleSaleAdded = () => {
+  // Handle successful manual record insertion or update
+  const handleSaleSaved = () => {
     setIsFormOpen(false);
+    setEditingSale(null);
     fetchSales(); // Refresh the list from the DB
+  };
+
+  // Open the form in 'Edit' mode
+  const handleEditClick = (sale) => {
+    setEditingSale(sale);
+    setIsFormOpen(true);
+    // Scroll to top to see the form
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Handle Delete Action with confirmation Toast
+  const handleDeleteClick = (id) => {
+    toast((t) => (
+      <div className="flex flex-col gap-3">
+        <span className="font-medium text-gray-800">¿Estás seguro de eliminar este registro?</span>
+        <div className="flex gap-2 justify-end">
+          <button 
+            className="px-3 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors"
+            onClick={() => toast.dismiss(t.id)}
+          >
+            Cancelar
+          </button>
+          <button 
+            className="px-3 py-1.5 text-xs bg-red-500 hover:bg-red-600 text-white rounded-md transition-colors font-medium shadow-sm"
+            onClick={async () => {
+              toast.dismiss(t.id);
+              try {
+                const loadingToast = toast.loading('Eliminando...');
+                await salesApi.deleteSale(id);
+                toast.dismiss(loadingToast);
+                toast.success('Registro eliminado exitosamente');
+                fetchSales();
+              } catch (error) {
+                toast.error('Error al eliminar el registro');
+              }
+            }}
+          >
+            Sí, eliminar
+          </button>
+        </div>
+      </div>
+    ), { 
+      duration: 5000, 
+      position: 'top-center',
+      style: { minWidth: '300px' }
+    });
+  };
+
+  // UI/UX: Derived Metrics for the Dashboard
+  const handleFileUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.name.endsWith('.csv')) {
+      toast.error('Por favor selecciona un archivo .csv válido');
+      return;
+    }
+
+    try {
+      setIsUploading(true);
+      const loadingToast = toast.loading('Procesando archivo CSV...');
+      
+      const response = await salesApi.uploadCsv(file);
+      
+      toast.dismiss(loadingToast);
+      
+      if (response.total_imported > 0) {
+        toast.success(`¡Éxito! Se importaron ${response.total_imported} ventas nuevas.`);
+        fetchSales(); // Recargar tabla
+      } else if (response.total_ignored > 0 && response.total_errors === 0) {
+        toast.success(`Archivo procesado. ${response.total_ignored} filas ignoradas (no entregadas). No hubo errores.`);
+      } else {
+        toast.error(`Importación completada con errores. Revisa la consola.`);
+      }
+
+      if (response.total_errors > 0) {
+        toast.error(`Omitimos ${response.total_errors} filas defectuosas o duplicadas.`);
+        console.warn('Detalles de errores CSV:', response.error_details);
+      }
+      
+    } catch (error) {
+      toast.dismiss();
+      toast.error(error.response?.data?.detail || 'Error crítico al subir el archivo CSV.');
+    } finally {
+      setIsUploading(false);
+      // Reset input para permitir subir el mismo archivo otra vez si se corrió
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
   // UI/UX: Derived Metrics for the Dashboard
@@ -82,16 +175,32 @@ const SalesPage = () => {
           </button>
           
           <button 
-            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-white text-gray-700 font-medium px-4 py-2.5 rounded-xl border border-gray-200 hover:border-gray-300 hover:bg-gray-50 transition-all shadow-sm hover:shadow"
-            onClick={() => toast('Función de Subir CSV en desarrollo', { icon: '🚧'})}
+            disabled={isUploading}
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-white text-gray-700 font-medium px-4 py-2.5 rounded-xl border border-gray-200 hover:border-gray-300 hover:bg-gray-50 transition-all shadow-sm hover:shadow disabled:opacity-50"
+            onClick={() => fileInputRef.current?.click()}
           >
-            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            <span className="hidden sm:inline">Importar CSV</span>
+            {isUploading ? (
+              <span className="w-4 h-4 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin"></span>
+            ) : (
+              <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+            )}
+            <span className="hidden sm:inline">{isUploading ? 'Procesando...' : 'Importar CSV'}</span>
             <span className="sm:hidden">CSV</span>
           </button>
           
+          <input 
+            type="file" 
+            accept=".csv"
+            className="hidden" 
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+          />
+          
           <button 
-            onClick={() => setIsFormOpen(!isFormOpen)}
+            onClick={() => {
+              setEditingSale(null); // Ensure we open a clean form
+              setIsFormOpen(!isFormOpen);
+            }}
             className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-gradient-to-b from-blue-500 to-blue-600 text-white font-medium px-5 py-2.5 rounded-xl hover:from-blue-600 hover:to-blue-700 transition-all shadow-md shadow-blue-500/20 hover:shadow-lg hover:shadow-blue-500/30 active:scale-95 border border-blue-600/50"
           >
             <PlusCircle className="w-4 h-4" />
@@ -137,7 +246,14 @@ const SalesPage = () => {
       {/* Manual Entry Form Canvas */}
       {isFormOpen && (
         <div className="animate-in fade-in slide-in-from-top-4 duration-300">
-          <SalesForm onSuccess={handleSaleAdded} onCancel={() => setIsFormOpen(false)} />
+          <SalesForm 
+            onSuccess={handleSaleSaved} 
+            onCancel={() => {
+              setIsFormOpen(false);
+              setEditingSale(null);
+            }} 
+            initialData={editingSale} 
+          />
         </div>
       )}
 
@@ -145,7 +261,14 @@ const SalesPage = () => {
       <div className="bg-white shadow-sm shadow-gray-200/50 border border-gray-200 rounded-2xl overflow-hidden flex flex-col">
         {/* Table Toolbar */}
         <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row justify-between items-center gap-4">
-          <h3 className="font-semibold text-gray-700">Registro de Transacciones</h3>
+          <div className="flex items-center gap-3">
+             <h3 className="font-semibold text-gray-700">Registro de Transacciones</h3>
+             {!isLoading && sales.length > 0 && (
+                <span className="bg-blue-100 text-blue-700 text-xs font-bold px-2.5 py-1 rounded-full border border-blue-200/50">
+                  {sales.length} Entregas
+                </span>
+             )}
+          </div>
           <div className="relative w-full sm:w-72">
             <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
             <input 
@@ -160,7 +283,12 @@ const SalesPage = () => {
         
         {/* Table wrapper with height constraints for inner scrolling */}
         <div className="relative overflow-hidden">
-          <SalesTable sales={filteredSales} isLoading={isLoading} />
+          <SalesTable 
+            sales={filteredSales} 
+            isLoading={isLoading} 
+            onEdit={handleEditClick}
+            onDelete={handleDeleteClick}
+          />
         </div>
       </div>
       

@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from typing import List
 import pandas as pd
 import io
+import uuid
 from decimal import Decimal
 
 import models
@@ -57,7 +58,8 @@ def create_manual_sale(sale: schemas.SaleCreateManual, db: Session = Depends(get
         sale_price=sale.sale_price,
         profit=profit_val,
         seller=sale.seller,
-        source='manual'
+        source='manual',
+        external_id=f"MANUAL-{uuid.uuid4()}"
     )
     
     try:
@@ -79,7 +81,12 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     
     contents = await file.read()
     try:
+        # Read with default first, but drop rows that are completely empty
         df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+        df.dropna(how='all', inplace=True)
+        # Drop columns that are completely unnamed or empty
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+        
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading CSV: {str(e)}")
 
@@ -87,12 +94,13 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     
     # Flexible column mapping
     aliases = {
-        'sale_date': ['fecha', 'sale_date', 'fecha_venta', 'fecha_de_confirmacion', 'fecha_confirmacion', 'fehca_de_confirmacion'],
+        'external_id': ['id', 'pedido', '#_pedido', 'numero_de_pedido', 'order_id'],
+        'sale_date': ['fecha', 'sale_date', 'fecha_venta', 'fecha_de_confirmacion', 'fecha_confirmacion', 'fehca_de_confirmacion', 'n', 'n°'],
         'product_name': ['producto', 'product_name', 'articulo', 'nombre_producto', 'producto_'],
         'quantity': ['cantidad', 'quantity', 'cant'],
         'purchase_price': ['costo_proveedor', 'costo', 'costo_prov', 'precio_compra', 'purchase_price', 'costo_provedor'],
         'sale_price': ['precio_total', 'venta', 'sale_price', 'precio_venta', 'precio_total_'],
-        'seller': ['asesor', 'vendedor', 'seller', 'asesores'],
+        'seller': ['plataforma', 'platform', 'canal', 'origen_venta', 'origen', 'tienda'],
         'estado': ['estado', 'status', 'estatus']
     }
 
@@ -126,6 +134,7 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     # Process filtered rows
     for index, row in df_entregado.iterrows():
         try:
+            external_id_val = row.get(mapped_columns.get('external_id'))
             sale_date_val = row.get(mapped_columns.get('sale_date'))
             product_name_val = row.get(mapped_columns.get('product_name'))
             quantity_val = row.get(mapped_columns.get('quantity'))
@@ -137,7 +146,7 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
             sale_date_str = str(sale_date_val).strip().upper() if not pd.isna(sale_date_val) else ""
             
             # Check required fields for these delivery sales (relaxing purchase_price and sale_price requirements)
-            if pd.isna(sale_date_val) or pd.isna(product_name_val) or pd.isna(quantity_val) or sale_date_str == 'N/A' or sale_date_str == 'NAN':
+            if pd.isna(sale_date_val) or pd.isna(product_name_val) or pd.isna(quantity_val) or str(product_name_val).strip() == '' or str(quantity_val).strip() == '' or sale_date_str == 'N/A' or sale_date_str == 'NAN':
                 raise ValueError("Faltan campos obligatorios en esta fila (fecha, producto o cantidad).")
 
             try:
@@ -149,18 +158,20 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
             try:
                 parsed_quantity = int(quantity_val)
                 
-                # Handle missing sale price by defaulting to 0.00
-                if pd.isna(sale_price_val) or str(sale_price_val).strip() == '' or str(sale_price_val).strip().upper() == 'N/A':
-                    parsed_sale_price = Decimal('0.00')
-                else:
-                    parsed_sale_price = Decimal(str(sale_price_val).replace(',', ''))
+                # Cleaning function for money strings like "$25,00" or " 25.00 "
+                def clean_money(val):
+                    if pd.isna(val) or str(val).strip() == '' or str(val).strip().upper() == 'N/A':
+                        return Decimal('0.00')
+                    # Remove $ sign, replace , with . for decimal casting
+                    clean_str = str(val).replace('$', '').replace('.', '').replace(',', '.').strip()
+                    try:
+                        return Decimal(clean_str)
+                    except:
+                        return Decimal('0.00')
+
+                parsed_sale_price = clean_money(sale_price_val)
+                parsed_purchase_price = clean_money(purchase_price_val)
                 
-                # Handle missing purchase price by defaulting to 0.00
-                if pd.isna(purchase_price_val) or str(purchase_price_val).strip() == '' or str(purchase_price_val).strip().upper() == 'N/A':
-                    parsed_purchase_price = Decimal('0.00')
-                else:
-                    parsed_purchase_price = Decimal(str(purchase_price_val).replace(',', ''))
-                    
             except Exception:
                 raise ValueError("Formato numérico inválido en cantidad o precios (costo_proveedor, precio_total).")
 
@@ -175,7 +186,8 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
                 sale_price=parsed_sale_price,
                 profit=profit_val,
                 seller=str(seller_val).strip() if pd.notna(seller_val) else None,
-                source='csv'
+                source='csv',
+                external_id=str(external_id_val).strip() if pd.notna(external_id_val) else f"CSV-MISSING-ID-{uuid.uuid4()}"
             )
             
             db.add(new_sale)
@@ -184,8 +196,9 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
             
         except IntegrityError:
             db.rollback()
-            total_errors += 1
-            error_details.append(schemas.ErrorDetail(fila=index + 2, error="Registro duplicado (misma fecha, producto, vendedor y cantidad)."))
+            # This is IDEMPOTENCY: We legitimately wanted to insert, but it's a known duplicate external_id.
+            # We silently ignore it instead of treating it as a critical error.
+            total_ignored += 1
         except ValueError as ve:
             db.rollback()
             total_errors += 1
@@ -202,3 +215,34 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
         total_errors=total_errors,
         error_details=error_details
     )
+
+@app.put('/api/sales/{sale_id}', response_model=schemas.SaleResponse)
+def update_sale(sale_id: int, sale: schemas.SaleCreateManual, db: Session = Depends(get_db)):
+    db_sale = db.query(models.Sale).filter(models.Sale.id == sale_id).first()
+    if not db_sale:
+        raise HTTPException(status_code=404, detail='Venta no encontrada')
+    
+    profit_val = sale.sale_price - (sale.purchase_price * sale.quantity)
+    
+    db_sale.sale_date = sale.sale_date
+    db_sale.product_name = sale.product_name
+    db_sale.quantity = sale.quantity
+    db_sale.purchase_price = sale.purchase_price
+    db_sale.sale_price = sale.sale_price
+    db_sale.seller = sale.seller
+    db_sale.profit = profit_val
+    
+    db.commit()
+    db.refresh(db_sale)
+    return db_sale
+
+@app.delete('/api/sales/{sale_id}')
+def delete_sale(sale_id: int, db: Session = Depends(get_db)):
+    db_sale = db.query(models.Sale).filter(models.Sale.id == sale_id).first()
+    if not db_sale:
+        raise HTTPException(status_code=404, detail='Venta no encontrada')
+    
+    db.delete(db_sale)
+    db.commit()
+    return {'message': 'Venta eliminada exitosamente'}
+

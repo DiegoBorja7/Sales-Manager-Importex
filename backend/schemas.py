@@ -10,6 +10,7 @@ class SaleBase(BaseModel):
     purchase_price: Decimal = Field(decimal_places=2)
     sale_price: Decimal = Field(decimal_places=2)
     seller: Optional[str] = None
+    external_id: Optional[str] = None
 
 class SaleCreateManual(SaleBase):
     pass
