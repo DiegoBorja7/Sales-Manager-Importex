@@ -15,3 +15,4 @@ class Sale(Base):
     source = Column(String, nullable=False) # 'csv' or 'manual'
     external_id = Column(String, unique=True, index=True, nullable=True) # E.g., Dropi ID or generated Manual ID
     created_at = Column(DateTime, server_default=text("NOW()"))
+    updated_at = Column(DateTime, server_default=text("NOW()"), onupdate=text("NOW()"))

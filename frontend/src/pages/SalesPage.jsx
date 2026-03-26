@@ -1,9 +1,9 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import toast from 'react-hot-toast';
 import { salesApi } from '../services/salesApi';
 import SalesTable from '../components/SalesTable';
 import SalesForm from '../components/SalesForm';
-import { PlusCircle, FileSpreadsheet, RefreshCw, TrendingUp, DollarSign, Package, Search } from 'lucide-react';
+import { PlusCircle, FileSpreadsheet, RefreshCw, DollarSign, Package, Search, Filter, X } from 'lucide-react';
 
 const SalesPage = () => {
   const [sales, setSales] = useState([]);
@@ -12,36 +12,76 @@ const SalesPage = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [editingSale, setEditingSale] = useState(null); // Tracks the sale being edited
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [productFilter, setProductFilter] = useState('');
+  const [sourceFilter, setSourceFilter] = useState('');
+  const [availableProducts, setAvailableProducts] = useState([]);
+  const [availableSources, setAvailableSources] = useState([]);
+  const [editingSale, setEditingSale] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pagination, setPagination] = useState({ total: 0, totalPages: 1, limit: 50 });
+  const [metrics, setMetrics] = useState({ revenue: 0, profit: 0, items: 0 });
   
   const fileInputRef = useRef(null);
 
-  // Fetch sales on component mount
-  const fetchSales = async () => {
+  // Debounce search input (400ms delay before hitting server)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+      setCurrentPage(1);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Fetch sales from API
+  const fetchSales = useCallback(async (page = currentPage) => {
     try {
       setIsRefreshing(true);
-      // Fetch real data from FastAPI
-      const data = await salesApi.getSales();
-      setSales(data);
+      const response = await salesApi.getSales(page, pagination.limit, {
+        search: debouncedSearch,
+        product: productFilter,
+        source: sourceFilter
+      });
+      setSales(response.data);
+      setPagination({
+        total: response.total,
+        totalPages: response.total_pages,
+        limit: response.limit
+      });
+      setMetrics({
+        revenue: response.metrics.total_revenue,
+        profit: response.metrics.total_profit,
+        items: response.metrics.total_items
+      });
+      setAvailableProducts(response.available_products || []);
+      setAvailableSources(response.available_sources || []);
+      if (response.data.length > 0) {
+        const mostRecent = response.data.reduce((latest, sale) => {
+          const d = new Date(sale.created_at);
+          return d > latest ? d : latest;
+        }, new Date(0));
+        setLastUpdated(mostRecent);
+      }
       setIsLoading(false);
       setIsRefreshing(false);
-      
     } catch (error) {
       toast.error("Error al cargar las ventas.");
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  };
+  }, [currentPage, debouncedSearch, productFilter, sourceFilter, pagination.limit]);
 
   useEffect(() => {
-    fetchSales();
-  }, []);
+    fetchSales(currentPage);
+  }, [currentPage, debouncedSearch, productFilter, sourceFilter]);
 
   // Handle successful manual record insertion or update
   const handleSaleSaved = () => {
     setIsFormOpen(false);
     setEditingSale(null);
-    fetchSales(); // Refresh the list from the DB
+    setCurrentPage(1);
+    fetchSales(1);
   };
 
   // Open the form in 'Edit' mode
@@ -132,25 +172,22 @@ const SalesPage = () => {
     }
   };
 
-  // UI/UX: Derived Metrics for the Dashboard
-  const metrics = useMemo(() => {
-    if (!sales.length) return { revenue: 0, profit: 0, items: 0 };
-    return sales.reduce((acc, sale) => ({
-      revenue: acc.revenue + Number(sale.sale_price || 0),
-      profit: acc.profit + Number(sale.profit || 0),
-      items: acc.items + Number(sale.quantity || 0)
-    }), { revenue: 0, profit: 0, items: 0 });
-  }, [sales]);
+  const hasActiveFilters = debouncedSearch || productFilter || sourceFilter;
 
-  // UI/UX: Search Filter
-  const filteredSales = useMemo(() => {
-    if (!searchQuery) return sales;
-    const lowerQuery = searchQuery.toLowerCase();
-    return sales.filter(s => 
-      s.product_name?.toLowerCase().includes(lowerQuery) || 
-      s.seller?.toLowerCase().includes(lowerQuery)
-    );
-  }, [sales, searchQuery]);
+  const clearAllFilters = () => {
+    setSearchQuery('');
+    setDebouncedSearch('');
+    setProductFilter('');
+    setSourceFilter('');
+    setCurrentPage(1);
+  };
+
+  const handlePageChange = (newPage) => {
+    if (newPage >= 1 && newPage <= pagination.totalPages) {
+      setCurrentPage(newPage);
+      window.scrollTo({ top: document.querySelector('[data-section="table"]')?.offsetTop - 20 || 0, behavior: 'smooth' });
+    }
+  };
 
   const formatCurrency = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
 
@@ -211,7 +248,7 @@ const SalesPage = () => {
       </div>
 
       {/* Metrics Cards (KPIs) */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 lg:gap-6">
         <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 flex items-center gap-4 transition-all hover:shadow-md hover:border-blue-100 group">
           <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center group-hover:bg-blue-100 group-hover:scale-110 transition-transform">
             <DollarSign className="w-6 h-6 text-blue-600" />
@@ -219,16 +256,6 @@ const SalesPage = () => {
           <div>
             <p className="text-sm font-medium text-gray-500">Ingresos Totales</p>
             <p className="text-2xl font-bold text-gray-800 tracking-tight">{formatCurrency(metrics.revenue)}</p>
-          </div>
-        </div>
-        
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 flex items-center gap-4 transition-all hover:shadow-md hover:emerald-100 group">
-          <div className="w-12 h-12 rounded-xl bg-emerald-50 flex items-center justify-center group-hover:bg-emerald-100 group-hover:scale-110 transition-transform">
-            <TrendingUp className="w-6 h-6 text-emerald-600" />
-          </div>
-          <div>
-            <p className="text-sm font-medium text-gray-500">Ganancia Neta</p>
-            <p className="text-2xl font-bold text-emerald-600 tracking-tight">{formatCurrency(metrics.profit)}</p>
           </div>
         </div>
 
@@ -260,34 +287,79 @@ const SalesPage = () => {
       {/* Data Section */}
       <div className="bg-white shadow-sm shadow-gray-200/50 border border-gray-200 rounded-2xl overflow-hidden flex flex-col">
         {/* Table Toolbar */}
-        <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row justify-between items-center gap-4">
-          <div className="flex items-center gap-3">
-             <h3 className="font-semibold text-gray-700">Registro de Transacciones</h3>
-             {!isLoading && sales.length > 0 && (
+        <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex flex-col gap-3">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+            <div className="flex items-center gap-3">
+              <h3 className="font-semibold text-gray-700">Registro de Transacciones</h3>
+              {!isLoading && (
                 <span className="bg-blue-100 text-blue-700 text-xs font-bold px-2.5 py-1 rounded-full border border-blue-200/50">
-                  {sales.length} Entregas
+                  {pagination.total} {hasActiveFilters ? 'Filtrados' : 'Entregas'}
                 </span>
-             )}
+              )}
+            </div>
+            <div className="relative w-full sm:w-72">
+              <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
+              <input 
+                type="text" 
+                placeholder="Buscar producto, vendedor, monto..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-4 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all shadow-sm"
+              />
+            </div>
           </div>
-          <div className="relative w-full sm:w-72">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
-            <input 
-              type="text" 
-              placeholder="Buscar por producto..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all shadow-sm"
-            />
+
+          {/* Filter Dropdowns Row */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Filter className="w-4 h-4 text-gray-400" />
+            <select
+              value={productFilter}
+              onChange={(e) => { setProductFilter(e.target.value); setCurrentPage(1); }}
+              className="px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-sm cursor-pointer"
+            >
+              <option value="">Todos los productos</option>
+              {availableProducts.map(p => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+
+            <select
+              value={sourceFilter}
+              onChange={(e) => { setSourceFilter(e.target.value); setCurrentPage(1); }}
+              className="px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-sm cursor-pointer"
+            >
+              <option value="">Todos los orígenes</option>
+              {availableSources.map(s => (
+                <option key={s} value={s}>{s.toUpperCase()}</option>
+              ))}
+            </select>
+
+            {hasActiveFilters && (
+              <button
+                onClick={clearAllFilters}
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-red-50 text-red-600 border border-red-200 rounded-lg text-xs font-semibold hover:bg-red-100 transition-all active:scale-95"
+              >
+                <X className="w-3 h-3" />
+                Limpiar filtros
+              </button>
+            )}
           </div>
         </div>
         
         {/* Table wrapper with height constraints for inner scrolling */}
         <div className="relative overflow-hidden">
           <SalesTable 
-            sales={filteredSales} 
+            sales={sales} 
             isLoading={isLoading} 
             onEdit={handleEditClick}
             onDelete={handleDeleteClick}
+            lastUpdated={lastUpdated}
+            currentPage={currentPage}
+            totalPages={pagination.totalPages}
+            totalRecords={pagination.total}
+            onPageChange={handlePageChange}
+            hasActiveFilters={!!hasActiveFilters}
+            onClearFilters={clearAllFilters}
           />
         </div>
       </div>

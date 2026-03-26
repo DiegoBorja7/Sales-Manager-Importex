@@ -20,6 +20,7 @@ class SaleResponse(SaleBase):
     profit: Decimal
     source: str
     created_at: datetime
+    updated_at: Optional[datetime] = None
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -33,3 +34,18 @@ class CSVImportReport(BaseModel):
     total_ignored: int
     total_errors: int
     error_details: List[ErrorDetail]
+
+class AggregatedMetrics(BaseModel):
+    total_revenue: float
+    total_profit: float
+    total_items: int
+
+class PaginatedSalesResponse(BaseModel):
+    data: List[SaleResponse]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+    metrics: AggregatedMetrics
+    available_products: List[str] = []
+    available_sources: List[str] = []

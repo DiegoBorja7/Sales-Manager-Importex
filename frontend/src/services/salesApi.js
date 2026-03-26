@@ -7,10 +7,11 @@ export const salesApi = {
   /**
    * Fetch all delivered sales for the dashboard
    */
-  getSales: async () => {
+  getSales: async (page = 1, limit = 50, { search = '', product = '', source = '' } = {}) => {
     try {
-      // Assuming a GET /api/sales endpoint exists or will exist in FastAPI
-      const response = await axios.get(`${API_BASE_URL}/api/sales`);
+      const response = await axios.get(`${API_BASE_URL}/api/sales`, {
+        params: { page, limit, search, product, source }
+      });
       return response.data;
     } catch (error) {
       console.error("Error fetching sales:", error);

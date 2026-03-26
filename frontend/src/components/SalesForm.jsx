@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { salesApi } from '../services/salesApi';
 import { Save, X } from 'lucide-react';
@@ -12,7 +12,19 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
     sale_price: initialData?.sale_price || '',
     seller: initialData?.seller || ''
   });
-  
+
+  // Reset form when switching between Edit and New mode
+  useEffect(() => {
+    setFormData({
+      sale_date: initialData?.sale_date || new Date().toISOString().split('T')[0],
+      product_name: initialData?.product_name || '',
+      quantity: initialData?.quantity || 1,
+      purchase_price: initialData?.purchase_price || '',
+      sale_price: initialData?.sale_price || '',
+      seller: initialData?.seller || ''
+    });
+  }, [initialData]);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleChange = (e) => {
