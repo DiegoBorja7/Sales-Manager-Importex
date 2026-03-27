@@ -5,18 +5,27 @@ const SalesTable = ({ sales, isLoading, onEdit, onDelete, lastUpdated, currentPa
   const [sortOrder, setSortOrder] = useState('asc');
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const scrollRef = useRef(null);
+  const mobileScrollRef = useRef(null);
 
-  // Track scroll position to show/hide the floating button
+  // Track scroll position to show/hide the floating button (both layouts)
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const handleScroll = () => {
+    const checkScroll = (el) => {
+      if (!el) return false;
       const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-      setShowScrollBtn(!isNearBottom && el.scrollHeight > el.clientHeight + 200);
+      return !isNearBottom && el.scrollHeight > el.clientHeight + 200;
     };
-    handleScroll(); // initial check
-    el.addEventListener('scroll', handleScroll);
-    return () => el.removeEventListener('scroll', handleScroll);
+    const handleScroll = () => {
+      setShowScrollBtn(checkScroll(scrollRef.current) || checkScroll(mobileScrollRef.current));
+    };
+    const desktop = scrollRef.current;
+    const mobile = mobileScrollRef.current;
+    handleScroll();
+    desktop?.addEventListener('scroll', handleScroll);
+    mobile?.addEventListener('scroll', handleScroll);
+    return () => {
+      desktop?.removeEventListener('scroll', handleScroll);
+      mobile?.removeEventListener('scroll', handleScroll);
+    };
   }, [sales]);
 
   // Sort sales based on date
@@ -115,7 +124,8 @@ const SalesTable = ({ sales, isLoading, onEdit, onDelete, lastUpdated, currentPa
 
   return (
     <div className="relative">
-      <div ref={scrollRef} className="overflow-x-auto overflow-y-auto max-h-[600px] scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
+      {/* ── Desktop Table (hidden on mobile) ── */}
+      <div ref={scrollRef} className="hidden md:block overflow-x-auto overflow-y-auto max-h-[600px] scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
       <table className="w-full text-sm text-left align-middle border-collapse isolate">
         <thead className="text-xs text-gray-500 uppercase bg-gray-50/95 backdrop-blur-md sticky top-0 z-10 border-b border-gray-200 shadow-sm">
           <tr>
@@ -197,11 +207,50 @@ const SalesTable = ({ sales, isLoading, onEdit, onDelete, lastUpdated, currentPa
       </table>
       </div>
 
+      {/* ── Mobile Card Layout (visible only < md) ── */}
+      <div ref={mobileScrollRef} className="md:hidden divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
+        {sortedSales.map((sale) => (
+          <div key={sale.id} className="p-4 bg-white hover:bg-gray-50/50 transition-colors">
+            <div className="flex justify-between items-start mb-2">
+              <div>
+                <p className="font-semibold text-gray-800 text-sm">{sale.product_name}</p>
+                <p className="text-xs text-gray-400 mt-0.5">{formatDate(sale.sale_date)}</p>
+              </div>
+              <span className="text-base font-bold text-gray-900">{formatCurrency(sale.sale_price)}</span>
+            </div>
+            <div className="flex items-center justify-between mt-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs text-gray-500">Cant: <strong className="text-gray-700">{sale.quantity}</strong></span>
+                <span className="text-gray-200">|</span>
+                <span className="text-xs text-gray-500">{sale.seller || <em className="text-gray-300">Sin vendedor</em>}</span>
+                <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase
+                  ${sale.source === 'csv'
+                    ? 'bg-blue-100 text-blue-700'
+                    : 'bg-purple-100 text-purple-700'}`}>
+                  {sale.source}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <button onClick={() => onEdit(sale)} className="p-1.5 text-blue-500 hover:bg-blue-100 rounded-md transition-colors" title="Editar">
+                  <Edit2 className="w-4 h-4" />
+                </button>
+                <button onClick={() => onDelete(sale.id)} className="p-1.5 text-red-400 hover:bg-red-50 rounded-md transition-colors" title="Eliminar">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
       {/* Floating scroll-to-bottom button */}
       {showScrollBtn && (
         <button
-          onClick={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })}
-          className="absolute bottom-24 right-6 z-20 w-9 h-9 bg-blue-600 text-white rounded-full shadow-lg shadow-blue-500/40 flex items-center justify-center hover:bg-blue-700 hover:shadow-xl hover:scale-110 active:scale-95 transition-all animate-bounce"
+          onClick={() => {
+            const el = scrollRef.current?.offsetParent ? scrollRef.current : mobileScrollRef.current;
+            el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+          }}
+          className="absolute bottom-24 right-4 md:right-6 z-20 w-9 h-9 bg-blue-600 text-white rounded-full shadow-lg shadow-blue-500/40 flex items-center justify-center hover:bg-blue-700 hover:shadow-xl hover:scale-110 active:scale-95 transition-all animate-bounce"
           title="Ir al final de la tabla"
         >
           <ArrowDown className="w-4 h-4" />
@@ -216,8 +265,8 @@ const SalesTable = ({ sales, isLoading, onEdit, onDelete, lastUpdated, currentPa
             {lastUpdated && (
               <span className="flex items-center gap-1.5 text-gray-400 font-medium">
                 <Clock className="w-3.5 h-3.5" />
-                Actualizado: {lastUpdated.toLocaleDateString('es-EC', { day: '2-digit', month: 'short', year: 'numeric' })}{' '}
-                {lastUpdated.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', hour12: true })}
+                Actualizado: {lastUpdated.toLocaleDateString('es-EC', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Guayaquil' })}{' '}
+                {lastUpdated.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/Guayaquil' })}
               </span>
             )}
           </div>

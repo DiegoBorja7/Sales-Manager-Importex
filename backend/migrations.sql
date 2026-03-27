@@ -33,3 +33,10 @@ CREATE INDEX IF NOT EXISTS ix_sales_external_id ON sales (external_id);
 -- Agregar columna updated_at para rastrear última modificación
 -- ───────────────────────────────────────────
 ALTER TABLE sales ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+
+
+-- ───────────────────────────────────────────
+-- Migración 004 | 2026-03-27
+-- Índice compuesto (sale_date, seller) para reportes y filtros
+-- ───────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS ix_sales_date_seller ON sales (sale_date, seller);

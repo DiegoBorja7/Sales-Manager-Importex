@@ -58,7 +58,8 @@ const SalesPage = () => {
       setAvailableSources(response.available_sources || []);
       if (response.data.length > 0) {
         const mostRecent = response.data.reduce((latest, sale) => {
-          const d = new Date(sale.created_at);
+          const timestamp = sale.created_at.endsWith('Z') ? sale.created_at : sale.created_at + 'Z';
+          const d = new Date(timestamp);
           return d > latest ? d : latest;
         }, new Date(0));
         setLastUpdated(mostRecent);

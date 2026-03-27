@@ -1,8 +1,11 @@
-from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, Index, text
 from database import Base
 
 class Sale(Base):
     __tablename__ = "sales"
+    __table_args__ = (
+        Index('ix_sales_date_seller', 'sale_date', 'seller'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     sale_date = Column(Date, index=True, nullable=False)

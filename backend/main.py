@@ -7,7 +7,17 @@ import pandas as pd
 import io
 import uuid
 import math
+import logging
+import time
 from decimal import Decimal
+
+# ── Logger Setup ──
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("importex")
 
 import models
 import schemas
@@ -128,6 +138,8 @@ def get_sales(
     all_products = [r[0] for r in db.query(models.Sale.product_name).distinct().order_by(models.Sale.product_name).all()]
     all_sources = [r[0] for r in db.query(models.Sale.source).distinct().order_by(models.Sale.source).all()]
     
+    logger.info(f"GET /api/sales | page={page} limit={limit} search='{search}' product='{product}' source='{source}' → {total} results")
+    
     return schemas.PaginatedSalesResponse(
         data=sales,
         total=total,
@@ -164,19 +176,24 @@ def create_manual_sale(sale: schemas.SaleCreateManual, db: Session = Depends(get
         db.add(new_sale)
         db.commit()
         db.refresh(new_sale)
+        logger.info(f"POST /api/sales/manual | Venta creada ID={new_sale.id} producto='{sale.product_name}' precio=${sale.sale_price}")
         return new_sale
     except IntegrityError:
         db.rollback()
+        logger.warning(f"POST /api/sales/manual | Duplicado rechazado producto='{sale.product_name}'")
         raise HTTPException(status_code=400, detail="Error: Ya existe un registro idéntico de esta venta.")
     except Exception as e:
         db.rollback()
+        logger.error(f"POST /api/sales/manual | Error inesperado: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error inesperado al guardar: {str(e)}")
 
 @app.post("/api/sales/upload-csv", response_model=schemas.CSVImportReport)
 async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    csv_start = time.time()
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a CSV.")
     
+    logger.info(f"POST /api/sales/upload-csv | Archivo recibido: '{file.filename}'")
     contents = await file.read()
     try:
         # Read with default first, but drop rows that are completely empty
@@ -280,9 +297,13 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
             
         except ValueError as ve:
             total_errors += 1
+            ext_ref = row.get(mapped_columns.get('external_id'), '?')
+            logger.warning(f"CSV fila #{index + 2} | Pedido: {ext_ref} | {str(ve)}")
             error_details.append(schemas.ErrorDetail(fila=index + 2, error=str(ve)))
         except Exception as e:
             total_errors += 1
+            ext_ref = row.get(mapped_columns.get('external_id'), '?')
+            logger.error(f"CSV fila #{index + 2} | Pedido: {ext_ref} | Error inesperado: {str(e)}")
             error_details.append(schemas.ErrorDetail(fila=index + 2, error=f"Error inesperado: {str(e)}"))
 
     # ── PHASE 2: Bulk insert, skipping duplicates ──
@@ -296,13 +317,19 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
         )
         
         new_sales = [s for s in parsed_sales if s.external_id not in existing_ids]
-        total_ignored += len(parsed_sales) - len(new_sales)  # Duplicates silently skipped
+        duplicates_skipped = len(parsed_sales) - len(new_sales)
+        total_ignored += duplicates_skipped
+        if duplicates_skipped > 0:
+            logger.info(f"CSV bulk insert | {duplicates_skipped} duplicados omitidos por external_id")
         
         if new_sales:
             db.add_all(new_sales)
             db.commit()
         
         total_imported = len(new_sales)
+
+    csv_elapsed = round(time.time() - csv_start, 2)
+    logger.info(f"POST /api/sales/upload-csv | Completado en {csv_elapsed}s → importados={total_imported} ignorados={total_ignored} errores={total_errors} de {total_processed} filas")
 
     return schemas.CSVImportReport(
         total_processed=total_processed,
@@ -330,6 +357,7 @@ def update_sale(sale_id: int, sale: schemas.SaleCreateManual, db: Session = Depe
     
     db.commit()
     db.refresh(db_sale)
+    logger.info(f"PUT /api/sales/{sale_id} | Venta actualizada producto='{sale.product_name}' precio=${sale.sale_price}")
     return db_sale
 
 @app.delete('/api/sales/{sale_id}')
@@ -340,5 +368,6 @@ def delete_sale(sale_id: int, db: Session = Depends(get_db)):
     
     db.delete(db_sale)
     db.commit()
+    logger.info(f"DELETE /api/sales/{sale_id} | Venta eliminada producto='{db_sale.product_name}'")
     return {'message': 'Venta eliminada exitosamente'}
 
