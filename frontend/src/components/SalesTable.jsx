@@ -145,8 +145,9 @@ const SalesTable = ({ sales, isLoading, onEdit, onDelete, lastUpdated, currentPa
             </th>
             <th scope="col" className="px-6 py-4 font-bold tracking-wider">Producto</th>
             <th scope="col" className="px-6 py-4 font-bold tracking-wider text-center w-24">Cant.</th>
-            <th scope="col" className="px-6 py-4 font-bold tracking-wider text-right">Monto Venta</th>
+            <th scope="col" className="px-6 py-4 font-bold tracking-wider text-right">Precio Venta</th>
             <th scope="col" className="px-6 py-4 font-bold tracking-wider">Vendedor</th>
+            <th scope="col" className="px-3 py-4 font-bold tracking-wider text-center w-24">Pago</th>
             <th scope="col" className="px-6 py-4 font-bold tracking-wider text-center w-28">Origen</th>
             <th scope="col" className="px-6 py-4 font-bold tracking-wider text-center w-24">Acciones</th>
           </tr>
@@ -174,12 +175,22 @@ const SalesTable = ({ sales, isLoading, onEdit, onDelete, lastUpdated, currentPa
                 {sale.seller || <span className="text-gray-300 italic font-normal">No asignado</span>}
               </td>
 
+              <td className="px-3 py-4.5 text-center">
+                {sale.source === 'manual' ? (
+                  <span className="text-[10px] font-bold text-gray-400 bg-gray-50 border border-gray-200 px-1.5 py-0.5 rounded shadow-sm">
+                    {sale.payment_method || 'EFECTIVO'}
+                  </span>
+                ) : (
+                  <span className="text-gray-300">-</span>
+                )}
+              </td>
+
               <td className="px-6 py-4.5 text-center">
                 <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-bold uppercase tracking-wider
                   ${sale.source === 'csv'
                     ? 'bg-blue-100 text-blue-700 border border-blue-200/60'
-                    : 'bg-purple-100 text-purple-700 border border-purple-200/60'}`}>
-                  {sale.source}
+                    : 'bg-indigo-600 text-white shadow-sm'}`}>
+                  {sale.source === 'csv' ? 'E-COM' : 'TIENDA'}
                 </span>
               </td>
 
@@ -212,29 +223,35 @@ const SalesTable = ({ sales, isLoading, onEdit, onDelete, lastUpdated, currentPa
         {sortedSales.map((sale) => (
           <div key={sale.id} className="p-4 bg-white hover:bg-gray-50/50 transition-colors">
             <div className="flex justify-between items-start mb-2">
-              <div>
-                <p className="font-semibold text-gray-800 text-sm">{sale.product_name}</p>
-                <p className="text-xs text-gray-400 mt-0.5">{formatDate(sale.sale_date)}</p>
+              <div className="flex-1 pr-4">
+                <p className="font-bold text-gray-900 text-sm leading-snug">{sale.product_name}</p>
+                <div className="flex items-center gap-2 mt-1">
+                   <p className="text-[10px] text-gray-400 font-medium">{formatDate(sale.sale_date)}</p>
+                   {sale.source === 'manual' && (
+                     <span className="text-[9px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded border border-gray-200 font-bold uppercase tracking-tight">
+                       {sale.payment_method || 'EFECTIVO'}
+                     </span>
+                   )}
+                </div>
               </div>
-              <span className="text-base font-bold text-gray-900">{formatCurrency(sale.sale_price)}</span>
+              <div className="text-right">
+                <span className="text-base font-black text-emerald-600">{formatCurrency(sale.sale_price)}</span>
+                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">{sale.source === 'csv' ? 'E-COM' : 'TIENDA'}</p>
+              </div>
             </div>
-            <div className="flex items-center justify-between mt-2">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-xs text-gray-500">Cant: <strong className="text-gray-700">{sale.quantity}</strong></span>
+
+            {/* Split Details for Mobile removed as per user request */}
+            <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-gray-500 font-medium">Asesor: <strong className="text-gray-800">{sale.seller || 'N/A'}</strong></span>
                 <span className="text-gray-200">|</span>
-                <span className="text-xs text-gray-500">{sale.seller || <em className="text-gray-300">Sin vendedor</em>}</span>
-                <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase
-                  ${sale.source === 'csv'
-                    ? 'bg-blue-100 text-blue-700'
-                    : 'bg-purple-100 text-purple-700'}`}>
-                  {sale.source}
-                </span>
+                <span className="text-[11px] text-gray-500 font-medium">Cant: <strong className="text-gray-800">{sale.quantity}</strong></span>
               </div>
-              <div className="flex items-center gap-1">
-                <button onClick={() => onEdit(sale)} className="p-1.5 text-blue-500 hover:bg-blue-100 rounded-md transition-colors" title="Editar">
+              <div className="flex items-center gap-2">
+                <button onClick={() => onEdit(sale)} className="p-2 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors" title="Editar">
                   <Edit2 className="w-4 h-4" />
                 </button>
-                <button onClick={() => onDelete(sale.id)} className="p-1.5 text-red-400 hover:bg-red-50 rounded-md transition-colors" title="Eliminar">
+                <button onClick={() => onDelete(sale.id)} className="p-2 text-red-400 hover:bg-red-50 rounded-lg transition-colors" title="Eliminar">
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>

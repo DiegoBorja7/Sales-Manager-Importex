@@ -1,27 +1,38 @@
 import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { salesApi } from '../services/salesApi';
+import { productApi } from '../services/productApi';
 import { Save, X } from 'lucide-react';
 
 const SalesForm = ({ onSuccess, onCancel, initialData }) => {
+  const [products, setProducts] = useState([]);
+
+  useEffect(() => {
+    productApi.getProducts(1, 50, { nopage: true })
+      .then(setProducts)
+      .catch(() => toast.error('Error al cargar catálogo'));
+  }, []);
+
   const [formData, setFormData] = useState({
     sale_date: initialData?.sale_date || new Date().toISOString().split('T')[0],
-    product_name: initialData?.product_name || '',
+    product_id: initialData?.product_id || '',
     quantity: initialData?.quantity || 1,
     purchase_price: initialData?.purchase_price || '',
     sale_price: initialData?.sale_price || '',
-    seller: initialData?.seller || ''
+    seller: initialData?.seller || '',
+    payment_method: initialData?.payment_method || 'Efectivo'
   });
 
   // Reset form when switching between Edit and New mode
   useEffect(() => {
     setFormData({
       sale_date: initialData?.sale_date || new Date().toISOString().split('T')[0],
-      product_name: initialData?.product_name || '',
+      product_id: initialData?.product_id || '',
       quantity: initialData?.quantity || 1,
       purchase_price: initialData?.purchase_price || '',
       sale_price: initialData?.sale_price || '',
-      seller: initialData?.seller || ''
+      seller: initialData?.seller || '',
+      payment_method: initialData?.payment_method || 'Efectivo'
     });
   }, [initialData]);
 
@@ -32,11 +43,25 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
     setFormData(prev => ({ ...prev, [name]: value }));
   };
 
+  const handleProductChange = (e) => {
+    const productId = e.target.value;
+    const selectedProd = products.find(p => p.id === parseInt(productId));
+    if (selectedProd) {
+      setFormData(prev => ({
+        ...prev,
+        product_id: productId,
+        purchase_price: selectedProd.purchase_price,
+        sale_price: selectedProd.sale_price,
+      }));
+    } else {
+      setFormData(prev => ({ ...prev, product_id: productId }));
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     
-    // Client side basic validation
-    if (!formData.product_name || !formData.sale_date || !formData.quantity || !formData.purchase_price || !formData.sale_price) {
+    if (!formData.product_id || !formData.sale_date || !formData.quantity || formData.purchase_price === '' || formData.sale_price === '') {
       toast.error('Por favor completa todos los campos obligatorios');
       return;
     }
@@ -51,6 +76,7 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
       
       const payload = {
         ...formData,
+        product_id: parseInt(formData.product_id, 10),
         quantity: parseInt(formData.quantity, 10),
         purchase_price: parseFloat(formData.purchase_price),
         sale_price: parseFloat(formData.sale_price),
@@ -111,16 +137,24 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
           {/* Producto */}
           <div className="space-y-1.5 border border-transparent focus-within:border-blue-100 focus-within:bg-blue-50/20 p-2 -m-2 rounded-xl transition-colors">
             <label className="block text-[13px] font-semibold text-gray-700 ml-1">Producto <span className="text-red-400">*</span></label>
-            <input 
-              type="text" 
-              name="product_name"
-              placeholder="Ej. Laptop Dell XP"
-              value={formData.product_name}
-              onChange={handleChange}
+            <select
+              name="product_id"
+              value={formData.product_id}
+              onChange={handleProductChange}
               disabled={isSubmitting}
-              className="mt-1 block w-full px-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:opacity-60 transition-shadow" 
+              className="mt-1 block w-full px-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:opacity-60 transition-shadow disabled:bg-gray-50"
               required
-            />
+            >
+              <option value="" disabled>Seleccione en catálogo</option>
+              {products.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.name} (Stock: {p.stock})
+                </option>
+              ))}
+            </select>
+            {formData.product_id && (
+              <p className="text-xs text-blue-600 ml-1 mt-1 font-medium">Auto-completado de precios activado</p>
+            )}
           </div>
 
           {/* Vendedor */}
@@ -153,8 +187,11 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
           </div>
 
           {/* Costo Proveedor */}
-          <div className="space-y-1.5 border border-transparent focus-within:border-blue-100 focus-within:bg-blue-50/20 p-2 -m-2 rounded-xl transition-colors">
-            <label className="block text-[13px] font-semibold text-gray-700 ml-1">Costo Unitario ($) <span className="text-red-400">*</span></label>
+          <div className="space-y-1.5 border border-transparent p-2 -m-2 rounded-xl transition-colors opacity-80">
+            <label className="block text-[13px] font-semibold text-gray-700 ml-1 flex items-center gap-1.5">
+              Costo Unitario ($) 
+              <span className="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 px-1.5 py-0.5 rounded tracking-wide">FIJADO POR BODEGA</span>
+            </label>
             <div className="relative mt-1 rounded-xl shadow-sm">
               <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
                 <span className="text-gray-400 sm:text-sm font-medium">$</span>
@@ -162,14 +199,10 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
               <input 
                 type="number" 
                 name="purchase_price"
-                min="0"
-                step="0.01"
-                placeholder="0.00"
                 value={formData.purchase_price}
-                onChange={handleChange}
-                disabled={isSubmitting}
-                className="block w-full pl-7 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:opacity-60 transition-shadow" 
-                required
+                readOnly
+                className="block w-full pl-7 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none transition-shadow cursor-not-allowed select-none text-gray-500 font-bold" 
+                title="El costo se extrae automáticamente del Catálogo de Inventario"
               />
             </div>
           </div>
@@ -194,6 +227,23 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
                 required
               />
             </div>
+          </div>
+
+          {/* Método de Pago */}
+          <div className="space-y-1.5 border border-transparent focus-within:border-blue-100 focus-within:bg-blue-50/20 p-2 -m-2 rounded-xl transition-colors">
+            <label className="block text-[13px] font-semibold text-gray-700 ml-1">Método de Pago</label>
+            <select
+              name="payment_method"
+              value={formData.payment_method}
+              onChange={handleChange}
+              disabled={isSubmitting}
+              className="mt-1 block w-full px-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:opacity-60 transition-shadow"
+            >
+              <option value="Efectivo">Efectivo</option>
+              <option value="Transferencia">Transferencia</option>
+              <option value="Tarjeta">Tarjeta</option>
+              <option value="Otro">Otro</option>
+            </select>
           </div>
         </div>
 
