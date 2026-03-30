@@ -3,6 +3,7 @@ import toast from 'react-hot-toast';
 import { salesApi } from '../services/salesApi';
 import SalesTable from '../components/SalesTable';
 import SalesForm from '../components/SalesForm';
+import ConfirmModal from '../components/ConfirmModal';
 import { PlusCircle, FileSpreadsheet, RefreshCw, DollarSign, Package, Search, Filter, X } from 'lucide-react';
 
 const SalesPage = () => {
@@ -22,6 +23,10 @@ const SalesPage = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [pagination, setPagination] = useState({ total: 0, totalPages: 1, limit: 50 });
   const [metrics, setMetrics] = useState({ revenue: 0, profit: 0, items: 0 });
+  
+  // Deletion Modal
+  const [saleToDelete, setSaleToDelete] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   
   const fileInputRef = useRef(null);
 
@@ -95,40 +100,22 @@ const SalesPage = () => {
 
   // Handle Delete Action with confirmation Toast
   const handleDeleteClick = (id) => {
-    toast((t) => (
-      <div className="flex flex-col gap-3">
-        <span className="font-medium text-gray-800">¿Estás seguro de eliminar este registro?</span>
-        <div className="flex gap-2 justify-end">
-          <button 
-            className="px-3 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors"
-            onClick={() => toast.dismiss(t.id)}
-          >
-            Cancelar
-          </button>
-          <button 
-            className="px-3 py-1.5 text-xs bg-red-500 hover:bg-red-600 text-white rounded-md transition-colors font-medium shadow-sm"
-            onClick={async () => {
-              toast.dismiss(t.id);
-              try {
-                const loadingToast = toast.loading('Eliminando...');
-                await salesApi.deleteSale(id);
-                toast.dismiss(loadingToast);
-                toast.success('Registro eliminado exitosamente');
-                fetchSales();
-              } catch (error) {
-                toast.error('Error al eliminar el registro');
-              }
-            }}
-          >
-            Sí, eliminar
-          </button>
-        </div>
-      </div>
-    ), { 
-      duration: 5000, 
-      position: 'top-center',
-      style: { minWidth: '300px' }
-    });
+    setSaleToDelete(id);
+  };
+
+  const confirmDeleteSale = async () => {
+    if (!saleToDelete) return;
+    setIsDeleting(true);
+    try {
+      await salesApi.deleteSale(saleToDelete);
+      toast.success('Registro eliminado exitosamente');
+      setSaleToDelete(null);
+      fetchSales();
+    } catch (error) {
+      toast.error('Error al eliminar el registro');
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   // UI/UX: Derived Metrics for the Dashboard
@@ -194,6 +181,23 @@ const SalesPage = () => {
 
   return (
     <div className="flex flex-col gap-6">
+
+      <ConfirmModal
+        isOpen={saleToDelete !== null}
+        title="Eliminar Registro de Venta"
+        message={
+          <>
+            ¿Estás seguro que deseas eliminar este registro histórico?<br/><br/>
+            Esta acción no se puede deshacer y los montos se descontarán del reporte mensual de inmediato.
+          </>
+        }
+        confirmText="Eliminar Venta"
+        cancelText="Conservar"
+        isDestructive={true}
+        isLoading={isDeleting}
+        onConfirm={confirmDeleteSale}
+        onCancel={() => setSaleToDelete(null)}
+      />
       
       {/* Header Actions */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white/70 backdrop-blur-xl p-6 rounded-2xl shadow-sm border border-gray-100/80">
