@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export const productApi = {
   getProducts: async (page = 1, limit = 50, params = {}) => {
@@ -15,32 +15,32 @@ export const productApi = {
         if (params.sort) queryString.append('sort', params.sort);
     }
     
-    const response = await axios.get(`${API_URL}/products?${queryString.toString()}`);
+    const response = await axios.get(`${API_BASE_URL}/api/products?${queryString.toString()}`);
     return response.data;
   },
 
   createProduct: async (productData) => {
-    const response = await axios.post(`${API_URL}/products`, productData);
+    const response = await axios.post(`${API_BASE_URL}/api/products`, productData);
     return response.data;
   },
 
   updateProduct: async (id, productData) => {
-    const response = await axios.put(`${API_URL}/products/${id}`, productData);
+    const response = await axios.put(`${API_BASE_URL}/api/products/${id}`, productData);
     return response.data;
   },
 
   adjustStock: async (id, quantity, reason) => {
-    const response = await axios.put(`${API_URL}/products/${id}/stock`, { quantity, reason });
+    const response = await axios.put(`${API_BASE_URL}/api/products/${id}/stock`, { quantity, reason });
     return response.data;
   },
 
   getMovements: async (id) => {
-    const response = await axios.get(`${API_URL}/products/${id}/movements`);
+    const response = await axios.get(`${API_BASE_URL}/api/products/${id}/movements`);
     return response.data;
   },
 
   deleteProduct: async (id) => {
-    const response = await axios.delete(`${API_URL}/products/${id}`);
+    const response = await axios.delete(`${API_BASE_URL}/api/products/${id}`);
     return response.data;
   }
 };
