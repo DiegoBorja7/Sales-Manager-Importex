@@ -28,6 +28,7 @@ class Sale(Base):
     source = Column(String, nullable=False) # 'csv' or 'manual'
     external_id = Column(String, unique=True, index=True, nullable=True) # E.g., Dropi ID or generated Manual ID
     shipping_cost = Column(Numeric(10, 2), nullable=False, default=0)
+    return_cost = Column(Numeric(14, 4), nullable=False, default=0)
     
     # --- Nuevos Campos: Liquidación de Comisiones y Facturación (Tienda Físico) ---
     payment_method = Column(String, nullable=True) # 'Efectivo', 'Transferencia', 'Tarjeta'

@@ -387,14 +387,16 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
         'sale_price': ['precio_total', 'venta', 'sale_price', 'precio_venta', 'precio_total_'],
         'seller': ['plataforma', 'platform', 'canal', 'origen_venta', 'origen', 'tienda'],
         'estado': ['estado', 'status', 'estatus'],
-        'shipping_cost': ['cstenvio', 'shipping_cost', 'costo_envio', 'envio']
+        'shipping_cost': ['cstenvio', 'shipping_cost', 'costo_envio', 'envio'],
+        'return_cost': ['cst dev', 'cst_dev', 'devolucion_costo', 'costo_devolucion']
     }
 
     mapped_columns = {}
     for standard_name, possible_names in aliases.items():
         found = False
         for col in df.columns:
-            if col in possible_names:
+            # Case-insensitive check
+            if str(col).strip().lower() in [name.lower() for name in possible_names]:
                 mapped_columns[standard_name] = col
                 found = True
                 break
@@ -446,19 +448,20 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
                 parsed_quantity = int(quantity_val)
                 parsed_sale_price = clean_money(sale_price_val)
                 raw_csv_total_cost = clean_money(purchase_price_val)
-                # Extraemos el costo de envío (CSTENVIO) si existe
                 raw_shipping_cost = clean_money(row.get(mapped_columns.get('shipping_cost'))) if mapped_columns.get('shipping_cost') else 0
+                raw_return_cost = clean_money(row.get(mapped_columns.get('return_cost'))) if mapped_columns.get('return_cost') else 0
                 
             except Exception:
-                raise ValueError("Formato numérico inválido en cantidad, precios o envío.")
+                raise ValueError("Formato numérico inválido en cantidad, precios, envío o devolución.")
 
             # REGLA E-COMMERCE: Dropi/CSV exporta el "Costo Proveedor" como el costo total de la orden.
             # Lo convertimos a costo unitario para estandarizarlo en la estructura de DB que lo espera así.
             parsed_unit_purchase_price = raw_csv_total_cost / parsed_quantity if parsed_quantity > 0 else raw_csv_total_cost
             parsed_shipping_cost = raw_shipping_cost
+            parsed_return_cost = raw_return_cost
             
-            # Utilidad = Venta - Costo Prod (Total) - Envío
-            profit_val = parsed_sale_price - raw_csv_total_cost - parsed_shipping_cost
+            # Utilidad = Venta - Costo Prod (Total) - Envío - Devolución
+            profit_val = parsed_sale_price - raw_csv_total_cost - parsed_shipping_cost - parsed_return_cost
             ext_id = str(external_id_val).strip() if pd.notna(external_id_val) else f"CSV-MISSING-ID-{uuid.uuid4()}"
             
             raw_product_name = str(product_name_val).strip()
@@ -475,6 +478,7 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
                 purchase_price=parsed_unit_purchase_price,
                 sale_price=parsed_sale_price,
                 shipping_cost=parsed_shipping_cost,
+                return_cost=parsed_return_cost,
                 profit=profit_val,
                 seller=str(seller_val).strip() if pd.notna(seller_val) else None,
                 source='csv',
@@ -512,6 +516,7 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
                 db_sale = db_existing_sales[sale_in.external_id]
                 db_sale.purchase_price = sale_in.purchase_price
                 db_sale.shipping_cost = sale_in.shipping_cost
+                db_sale.return_cost = sale_in.return_cost
                 db_sale.profit = sale_in.profit
                 # También actualizamos el nombre del producto por si cambió en el catálogo
                 db_sale.product_name = sale_in.product_name
@@ -706,7 +711,8 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
         func.sum(models.Sale.split_local).label('split_local_base'),
         func.sum(models.Sale.split_app).label('split_app_base'),
         func.sum(models.Sale.split_dev).label('split_dev_base'),
-        func.sum(models.Sale.split_company).label('split_company_base')
+        func.sum(models.Sale.split_company).label('split_company_base'),
+        func.sum(models.Sale.return_cost).label('return_cost_base')
     ).join(models.Product, models.Sale.product_id == models.Product.id, isouter=True).filter(
         extract('year', models.Sale.sale_date) == year_int,
         extract('month', models.Sale.sale_date) == month_int
@@ -742,12 +748,17 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
         # Esto hace que la suma de las columnas mostradas sea EXACTAMENTE igual a la utilidad de la fila.
         s_company = u - (s_seller + s_local + s_app + s_dev)
         
+        # 5. Devolución acumulada (Costo directo de CSV + Proporción de splits si aplica)
+        # Nota: split_dev se usa en manual, return_cost_base se usa en csv. 
+        # Sumamos ambos para la columna "DEVOLUCIÓN"
+        d = (Decimal(str(row.return_cost_base or 0)) + Decimal(str(row.split_dev_base or 0))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        
         summary_data[prod] = {
             "product_name": prod,
             "ventas": float(v),
             "proveedor": float(p),
             "logistica": float(l),
-            "devolucion": 0.0,
+            "devolucion": float(d),
             "ads": 0.0,
             "utilidad": float(u),
             "split_seller": float(s_seller),

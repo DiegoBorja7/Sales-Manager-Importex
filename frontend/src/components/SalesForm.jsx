@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { salesApi } from '../services/salesApi';
 import { productApi } from '../services/productApi';
-import { Save, X } from 'lucide-react';
+import { Save, X, Search, Package } from 'lucide-react';
+import SearchableProductSelect from './SearchableProductSelect';
 
 const SalesForm = ({ onSuccess, onCancel, initialData }) => {
   const [products, setProducts] = useState([]);
@@ -137,21 +138,13 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
           {/* Producto */}
           <div className="space-y-1.5 border border-transparent focus-within:border-blue-100 focus-within:bg-blue-50/20 p-2 -m-2 rounded-xl transition-colors">
             <label className="block text-[13px] font-semibold text-gray-700 ml-1">Producto <span className="text-red-400">*</span></label>
-            <select
-              name="product_id"
+            <SearchableProductSelect 
+              products={products}
               value={formData.product_id}
               onChange={handleProductChange}
               disabled={isSubmitting}
-              className="mt-1 block w-full px-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:opacity-60 transition-shadow disabled:bg-gray-50"
-              required
-            >
-              <option value="" disabled>Seleccione en catálogo</option>
-              {products.map(p => (
-                <option key={p.id} value={p.id}>
-                  {p.name} (Stock: {p.stock})
-                </option>
-              ))}
-            </select>
+              placeholder="Escribe el nombre del producto..."
+            />
             {formData.product_id && (
               <p className="text-xs text-blue-600 ml-1 mt-1 font-medium">Auto-completado de precios activado</p>
             )}
