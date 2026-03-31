@@ -42,6 +42,25 @@ class Sale(Base):
     created_at = Column(DateTime, server_default=text("NOW()"))
     updated_at = Column(DateTime, server_default=text("NOW()"), onupdate=text("NOW()"))
 
+class SaleReturn(Base):
+    __tablename__ = "sale_returns"
+    __table_args__ = (
+        Index('ix_sale_returns_date_product', 'return_date', 'product_name'),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    return_date = Column(Date, index=True, nullable=False)
+    external_id = Column(String, unique=True, index=True, nullable=False)  # Dropi order identifier (e.g. #6452)
+    product_name = Column(String, nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
+    quantity = Column(Integer, nullable=False, default=1)
+    return_cost = Column(Numeric(14, 4), nullable=False, default=0)
+    seller = Column(String, index=True, nullable=True)
+    source = Column(String, nullable=False, default='csv')  # currently csv
+    raw_status = Column(String, nullable=True)  # e.g. DEVOLUCION
+    created_at = Column(DateTime, server_default=text("NOW()"))
+    updated_at = Column(DateTime, server_default=text("NOW()"), onupdate=text("NOW()"))
+
 class Product(Base):
     __tablename__ = "products"
 

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List
 import pandas as pd
-import io
+import csv
 import uuid
 import math
 import logging
@@ -65,6 +65,38 @@ def clean_money(val):
         return Decimal(clean_str)
     except:
         return Decimal('0.00')
+
+def read_flexible_csv(contents: bytes) -> pd.DataFrame:
+    """
+    Read CSV robustly, including exports where a full row is wrapped in quotes.
+    Example problematic row:
+      "1,1/02/2026,...,""4,70"",..."
+    """
+    text = contents.decode('utf-8-sig', errors='replace')
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return pd.DataFrame()
+
+    # Header parse
+    header = next(csv.reader([lines[0]]))
+    rows = []
+
+    for line in lines[1:]:
+        parsed = next(csv.reader([line]))
+
+        # If entire row is a single quoted blob, parse the inner payload one more time.
+        if len(parsed) == 1 and ',' in parsed[0]:
+            parsed = next(csv.reader([parsed[0]]))
+
+        # Normalize row length to header width
+        if len(parsed) < len(header):
+            parsed += [''] * (len(header) - len(parsed))
+        elif len(parsed) > len(header):
+            parsed = parsed[:len(header)]
+
+        rows.append(parsed)
+
+    return pd.DataFrame(rows, columns=header)
 
 # ==========================================
 # PRODUCTS ENDPOINTS
@@ -312,6 +344,13 @@ def create_manual_sale(sale: schemas.SaleCreateManual, db: Session = Depends(get
     db_product = db.query(models.Product).filter(models.Product.id == sale.product_id).first()
     if not db_product:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+    if db_product.stock < sale.quantity:
+        raise HTTPException(status_code=400, detail=f"Stock insuficiente. Disponible: {db_product.stock}")
+
+    # Fuente de verdad: costo desde inventario
+    actual_purchase_price = Decimal(str(db_product.purchase_price or 0))
+    profit_val = sale.sale_price - (actual_purchase_price * sale.quantity)
         
     # CÁLCULO DE REPARTO DE ALTA PRECISIÓN (Sin redondeo temprano para evitar drift contable)
     split_vendedor = (profit_val * Decimal('0.40'))
@@ -366,8 +405,11 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     logger.info(f"POST /api/sales/upload-csv | Archivo recibido: '{file.filename}'")
     contents = await file.read()
     try:
-        # Read with default first, but drop rows that are completely empty
-        df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+        # Robust read to handle inconsistent quoting in legacy exports
+        df = read_flexible_csv(contents)
+        if df.empty:
+            raise HTTPException(status_code=400, detail="El CSV está vacío o no contiene filas válidas.")
+
         df.dropna(how='all', inplace=True)
         # Drop columns that are completely unnamed or empty
         df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
@@ -379,7 +421,8 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     
     # Flexible column mapping
     aliases = {
-        'external_id': ['id', 'pedido', '#_pedido', 'numero_de_pedido', 'order_id'],
+        # Business key for Dropi orders: prefer order number (#PEDIDO) to preserve historical dedupe.
+        'external_id': ['#_pedido', 'pedido', 'numero_de_pedido', 'order_id', 'id'],
         'sale_date': ['fecha', 'sale_date', 'fecha_venta', 'fecha_de_confirmacion', 'fecha_confirmacion', 'fehca_de_confirmacion', 'n', 'n°'],
         'product_name': ['producto', 'product_name', 'articulo', 'nombre_producto', 'producto_'],
         'quantity': ['cantidad', 'quantity', 'cant'],
@@ -392,143 +435,264 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     }
 
     mapped_columns = {}
+    normalized_columns = {str(col).strip().lower(): col for col in df.columns}
     for standard_name, possible_names in aliases.items():
-        found = False
-        for col in df.columns:
-            # Case-insensitive check
-            if str(col).strip().lower() in [name.lower() for name in possible_names]:
-                mapped_columns[standard_name] = col
-                found = True
+        matched_column = None
+        # Prioritize alias order (e.g. 'fecha' over fallback 'n')
+        for alias in possible_names:
+            alias_norm = alias.strip().lower()
+            if alias_norm in normalized_columns:
+                matched_column = normalized_columns[alias_norm]
                 break
-        if not found and standard_name == 'estado':
-             raise HTTPException(status_code=400, detail="La columna 'estado' es obligatoria en el CSV.")
+
+        if matched_column is not None:
+            mapped_columns[standard_name] = matched_column
+        elif standard_name == 'estado':
+            raise HTTPException(status_code=400, detail="La columna 'estado' es obligatoria en el CSV.")
 
     estado_col = mapped_columns['estado']
-    
+    # Optional fallback ID column when #PEDIDO is empty in some rows
+    fallback_external_id_col = None
+    if mapped_columns.get('external_id') != normalized_columns.get('id'):
+        fallback_external_id_col = normalized_columns.get('id')
+
+    def resolve_external_id(row) -> str | None:
+        ext_val = row.get(mapped_columns.get('external_id'))
+        if (pd.isna(ext_val) or str(ext_val).strip() == '') and fallback_external_id_col:
+            ext_val = row.get(fallback_external_id_col)
+        if pd.notna(ext_val) and str(ext_val).strip() != '':
+            return str(ext_val).strip()
+        return None
+
     total_processed = len(df)
     total_imported = 0
     total_ignored = 0
     total_errors = 0
     error_details = []
 
-    try:
-        # Strict filter: only "entregado"
-        entregado_mask = df[estado_col].astype(str).str.strip().str.lower() == 'entregado'
-        df_entregado = df[entregado_mask]
-        total_ignored = total_processed - len(df_entregado)
-    except KeyError:
-         raise HTTPException(status_code=400, detail=f"Error al procesar la columna de estado: {estado_col}")
+    # ── PHASE 1: Parse and validate rows in two lanes (sales + returns) ──
+    parsed_sales = []    # List[(row_number, Sale)]
+    parsed_returns = []  # List[(row_number, SaleReturn)]
 
-    # ── PHASE 1: Parse and validate all rows (no DB calls yet) ──
-    parsed_sales = []  # List of (index, Sale) tuples
-    
-    for index, row in df_entregado.iterrows():
-        try:
-            external_id_val = row.get(mapped_columns.get('external_id'))
-            sale_date_val = row.get(mapped_columns.get('sale_date'))
-            product_name_val = row.get(mapped_columns.get('product_name'))
-            quantity_val = row.get(mapped_columns.get('quantity'))
-            purchase_price_val = row.get(mapped_columns.get('purchase_price'))
-            sale_price_val = row.get(mapped_columns.get('sale_price'))
-            seller_val = row.get(mapped_columns.get('seller'))
+    for index, row in df.iterrows():
+        row_number = index + 2
+        estado_raw = str(row.get(estado_col, '')).strip()
+        estado_norm = estado_raw.lower()
+        external_id_val = resolve_external_id(row)
+        row_accounted = False
 
-            # Handle 'N/A' strings that might come in the CSV
-            sale_date_str = str(sale_date_val).strip().upper() if not pd.isna(sale_date_val) else ""
-            
-            # Check required fields
-            if pd.isna(sale_date_val) or pd.isna(product_name_val) or pd.isna(quantity_val) or str(product_name_val).strip() == '' or str(quantity_val).strip() == '' or sale_date_str == 'N/A' or sale_date_str == 'NAN':
-                raise ValueError("Faltan campos obligatorios en esta fila (fecha, producto o cantidad).")
+        # Return lane by value (source of truth = CST DEV > 0), independent from estado quality.
+        return_cost_val = clean_money(row.get(mapped_columns.get('return_cost'))) if mapped_columns.get('return_cost') else Decimal('0.00')
+        if return_cost_val > 0:
+            if not external_id_val:
+                total_errors += 1
+                error_details.append(
+                    schemas.ErrorDetail(
+                        fila=row_number,
+                        error="Devolución con CST DEV > 0 sin identificador de pedido."
+                    )
+                )
+            else:
+                sale_date_val = row.get(mapped_columns.get('sale_date'))
+                try:
+                    return_date = pd.to_datetime(sale_date_val, dayfirst=True).date()
+                except Exception:
+                    total_errors += 1
+                    error_details.append(
+                        schemas.ErrorDetail(
+                            fila=row_number,
+                            error=f"Formato de fecha inválido para devolución: {sale_date_val}"
+                        )
+                    )
+                    return_date = None
 
+                if return_date:
+                    product_name_val = row.get(mapped_columns.get('product_name'))
+                    final_product_name = str(product_name_val).strip() if pd.notna(product_name_val) and str(product_name_val).strip() != '' else 'Producto sin nombre'
+
+                    qty_raw = row.get(mapped_columns.get('quantity'))
+                    try:
+                        qty_val = int(qty_raw)
+                        if qty_val <= 0:
+                            qty_val = 1
+                    except Exception:
+                        qty_val = 1
+
+                    return_obj = models.SaleReturn(
+                        return_date=return_date,
+                        external_id=external_id_val,
+                        product_name=final_product_name,
+                        product_id=None,
+                        quantity=qty_val,
+                        return_cost=return_cost_val,
+                        seller=str(row.get(mapped_columns.get('seller'))).strip() if mapped_columns.get('seller') and pd.notna(row.get(mapped_columns.get('seller'))) else None,
+                        source='csv',
+                        raw_status=estado_raw
+                    )
+                    parsed_returns.append((row_number, return_obj))
+                    row_accounted = True
+
+        # 1) ENTREGADO -> sales table
+        if estado_norm == 'entregado':
             try:
-                parsed_date = pd.to_datetime(sale_date_val, dayfirst=True).date()
-            except Exception:
-                raise ValueError(f"Formato de fecha inválido: {sale_date_val}")
+                sale_date_val = row.get(mapped_columns.get('sale_date'))
+                product_name_val = row.get(mapped_columns.get('product_name'))
+                quantity_val = row.get(mapped_columns.get('quantity'))
+                purchase_price_val = row.get(mapped_columns.get('purchase_price'))
+                sale_price_val = row.get(mapped_columns.get('sale_price'))
+                seller_val = row.get(mapped_columns.get('seller'))
 
-            try:
-                parsed_quantity = int(quantity_val)
-                parsed_sale_price = clean_money(sale_price_val)
-                raw_csv_total_cost = clean_money(purchase_price_val)
-                raw_shipping_cost = clean_money(row.get(mapped_columns.get('shipping_cost'))) if mapped_columns.get('shipping_cost') else 0
-                raw_return_cost = clean_money(row.get(mapped_columns.get('return_cost'))) if mapped_columns.get('return_cost') else 0
-                
-            except Exception:
-                raise ValueError("Formato numérico inválido en cantidad, precios, envío o devolución.")
+                sale_date_str = str(sale_date_val).strip().upper() if not pd.isna(sale_date_val) else ""
+                if pd.isna(sale_date_val) or pd.isna(product_name_val) or pd.isna(quantity_val) or str(product_name_val).strip() == '' or str(quantity_val).strip() == '' or sale_date_str in ('N/A', 'NAN'):
+                    raise ValueError("Faltan campos obligatorios en esta fila (fecha, producto o cantidad).")
 
-            # REGLA E-COMMERCE: Dropi/CSV exporta el "Costo Proveedor" como el costo total de la orden.
-            # Lo convertimos a costo unitario para estandarizarlo en la estructura de DB que lo espera así.
-            parsed_unit_purchase_price = raw_csv_total_cost / parsed_quantity if parsed_quantity > 0 else raw_csv_total_cost
-            parsed_shipping_cost = raw_shipping_cost
-            parsed_return_cost = raw_return_cost
-            
-            # Utilidad = Venta - Costo Prod (Total) - Envío - Devolución
-            profit_val = parsed_sale_price - raw_csv_total_cost - parsed_shipping_cost - parsed_return_cost
-            ext_id = str(external_id_val).strip() if pd.notna(external_id_val) else f"CSV-MISSING-ID-{uuid.uuid4()}"
-            
-            raw_product_name = str(product_name_val).strip()
-            
-            # El e-commerce (Dropi) es dinámico, por tanto NO lo atamos al inventario físico
-            product_id = None
-            final_product_name = raw_product_name
+                try:
+                    parsed_date = pd.to_datetime(sale_date_val, dayfirst=True).date()
+                except Exception:
+                    raise ValueError(f"Formato de fecha inválido: {sale_date_val}")
 
-            new_sale = models.Sale(
-                sale_date=parsed_date,
-                product_id=product_id,
-                product_name=final_product_name,
-                quantity=parsed_quantity,
-                purchase_price=parsed_unit_purchase_price,
-                sale_price=parsed_sale_price,
-                shipping_cost=parsed_shipping_cost,
-                return_cost=parsed_return_cost,
-                profit=profit_val,
-                seller=str(seller_val).strip() if pd.notna(seller_val) else None,
-                source='csv',
-                external_id=ext_id
-            )
-            parsed_sales.append(new_sale)
-            
-        except ValueError as ve:
-            total_errors += 1
-            ext_ref = row.get(mapped_columns.get('external_id'), '?')
-            logger.warning(f"CSV fila #{index + 2} | Pedido: {ext_ref} | {str(ve)}")
-            error_details.append(schemas.ErrorDetail(fila=index + 2, error=str(ve)))
-        except Exception as e:
-            total_errors += 1
-            ext_ref = row.get(mapped_columns.get('external_id'), '?')
-            logger.error(f"CSV fila #{index + 2} | Pedido: {ext_ref} | Error inesperado: {str(e)}")
-            error_details.append(schemas.ErrorDetail(fila=index + 2, error=f"Error inesperado: {str(e)}"))
+                try:
+                    parsed_quantity = int(quantity_val)
+                    parsed_sale_price = clean_money(sale_price_val)
+                    raw_csv_total_cost = clean_money(purchase_price_val)
+                    parsed_shipping_cost = clean_money(row.get(mapped_columns.get('shipping_cost'))) if mapped_columns.get('shipping_cost') else Decimal('0.00')
+                except Exception:
+                    raise ValueError("Formato numérico inválido en cantidad, precios o envío.")
 
-    # ── PHASE 2: Upsert (Insert new, Update existing) ──
+                parsed_unit_purchase_price = raw_csv_total_cost / parsed_quantity if parsed_quantity > 0 else raw_csv_total_cost
+                # Devolución ya NO pertenece a la tabla de ventas e-commerce.
+                parsed_return_cost = Decimal('0.00')
+                profit_val = parsed_sale_price - raw_csv_total_cost - parsed_shipping_cost - parsed_return_cost
+                ext_id = external_id_val if external_id_val else f"CSV-MISSING-ID-{uuid.uuid4()}"
+                final_product_name = str(product_name_val).strip()
+
+                new_sale = models.Sale(
+                    sale_date=parsed_date,
+                    product_id=None,
+                    product_name=final_product_name,
+                    quantity=parsed_quantity,
+                    purchase_price=parsed_unit_purchase_price,
+                    sale_price=parsed_sale_price,
+                    shipping_cost=parsed_shipping_cost,
+                    return_cost=parsed_return_cost,
+                    profit=profit_val,
+                    seller=str(seller_val).strip() if pd.notna(seller_val) else None,
+                    source='csv',
+                    external_id=ext_id
+                )
+                parsed_sales.append((row_number, new_sale))
+                row_accounted = True
+
+            except ValueError as ve:
+                total_errors += 1
+                ext_ref = external_id_val or '?'
+                logger.warning(f"CSV fila #{row_number} | Pedido: {ext_ref} | {str(ve)}")
+                error_details.append(schemas.ErrorDetail(fila=row_number, error=str(ve)))
+            except Exception as e:
+                total_errors += 1
+                ext_ref = external_id_val or '?'
+                logger.error(f"CSV fila #{row_number} | Pedido: {ext_ref} | Error inesperado: {str(e)}")
+                error_details.append(schemas.ErrorDetail(fila=row_number, error=f"Error inesperado: {str(e)}"))
+
+        # 3) Other statuses -> ignored
+        if not row_accounted:
+            total_ignored += 1
+
+    # ── PHASE 2A: Upsert sales (ENTREGADO) ──
+    new_sales_count = 0
+    updated_sales_count = 0
+    new_returns_count = 0
+    updated_returns_count = 0
+
     if parsed_sales:
-        # 1. Identificar cuáles ya existen en un solo query
-        incoming_ids = [s.external_id for s in parsed_sales]
+        unique_sales = {}
+        for row_number, sale_obj in parsed_sales:
+            ext_id = sale_obj.external_id
+            if ext_id in unique_sales:
+                total_errors += 1
+                error_details.append(
+                    schemas.ErrorDetail(
+                        fila=row_number,
+                        error=f"Pedido repetido en archivo (external_id={ext_id})"
+                    )
+                )
+                continue
+            unique_sales[ext_id] = (row_number, sale_obj)
+
+        incoming_sales_ids = list(unique_sales.keys())
         db_existing_sales = {
             s.external_id: s for s in db.query(models.Sale)
-            .filter(models.Sale.external_id.in_(incoming_ids))
+            .filter(models.Sale.external_id.in_(incoming_sales_ids))
             .all()
         }
-        
-        new_sales_count = 0
-        updated_sales_count = 0
-        
-        for sale_in in parsed_sales:
+
+        for _, sale_in in unique_sales.values():
             if sale_in.external_id in db_existing_sales:
-                # MODO ACTUALIZACIÓN: Refrescamos los datos financieros clave
                 db_sale = db_existing_sales[sale_in.external_id]
-                db_sale.purchase_price = sale_in.purchase_price
-                db_sale.shipping_cost = sale_in.shipping_cost
-                db_sale.return_cost = sale_in.return_cost
-                db_sale.profit = sale_in.profit
-                # También actualizamos el nombre del producto por si cambió en el catálogo
+                db_sale.sale_date = sale_in.sale_date
                 db_sale.product_name = sale_in.product_name
+                db_sale.quantity = sale_in.quantity
+                db_sale.purchase_price = sale_in.purchase_price
+                db_sale.sale_price = sale_in.sale_price
+                db_sale.shipping_cost = sale_in.shipping_cost
+                db_sale.return_cost = Decimal('0.00')
+                db_sale.profit = sale_in.profit
+                db_sale.seller = sale_in.seller
                 updated_sales_count += 1
             else:
-                # MODO INSERCIÓN: Nuevo pedido
                 db.add(sale_in)
                 new_sales_count += 1
-        
+
+    # ── PHASE 2B: Upsert returns (DEVOLUCION) ──
+    if parsed_returns:
+        unique_returns = {}
+        for row_number, return_obj in parsed_returns:
+            ext_id = return_obj.external_id
+            if ext_id in unique_returns:
+                _, prev_obj = unique_returns[ext_id]
+                # Consolidate duplicates by keeping the highest return cost
+                if return_obj.return_cost >= prev_obj.return_cost:
+                    unique_returns[ext_id] = (row_number, return_obj)
+            else:
+                unique_returns[ext_id] = (row_number, return_obj)
+
+        incoming_return_ids = list(unique_returns.keys())
+        db_existing_returns = {
+            r.external_id: r for r in db.query(models.SaleReturn)
+            .filter(models.SaleReturn.external_id.in_(incoming_return_ids))
+            .all()
+        }
+
+        for _, return_in in unique_returns.values():
+            if return_in.external_id in db_existing_returns:
+                db_ret = db_existing_returns[return_in.external_id]
+                db_ret.return_date = return_in.return_date
+                db_ret.product_name = return_in.product_name
+                db_ret.quantity = return_in.quantity
+                db_ret.return_cost = return_in.return_cost
+                db_ret.seller = return_in.seller
+                db_ret.raw_status = return_in.raw_status
+                updated_returns_count += 1
+            else:
+                db.add(return_in)
+                new_returns_count += 1
+
+    try:
         db.commit()
-        total_imported = new_sales_count
-        logger.info(f"CSV upsert | {new_sales_count} nuevos creados, {updated_sales_count} actualizados con éxito")
+    except IntegrityError as e:
+        db.rollback()
+        logger.error(f"CSV upsert | Violación de unicidad external_id: {str(e)}")
+        raise HTTPException(
+            status_code=409,
+            detail="Se detectaron external_id duplicados durante el guardado. Revisa si el archivo contiene pedidos repetidos."
+        )
+
+    total_imported = new_sales_count + new_returns_count
+    logger.info(
+        f"CSV refactor | sales nuevos={new_sales_count} actualizados={updated_sales_count} | "
+        f"returns nuevos={new_returns_count} actualizados={updated_returns_count} | "
+        f"ignorados={total_ignored} errores={total_errors}"
+    )
 
     csv_elapsed = round(time.time() - csv_start, 2)
     logger.info(f"POST /api/sales/upload-csv | Completado en {csv_elapsed}s → importados={total_imported} ignorados={total_ignored} errores={total_errors} de {total_processed} filas")
@@ -556,6 +720,10 @@ def update_sale(sale_id: int, sale: schemas.SaleCreateManual, db: Session = Depe
         old_product = db.query(models.Product).filter(models.Product.id == db_sale.product_id).first()
         if old_product:
             old_product.stock += db_sale.quantity
+
+    # Fuente de verdad: costo desde inventario
+    actual_purchase_price = Decimal(str(db_product.purchase_price or 0))
+    profit_val = sale.sale_price - (actual_purchase_price * sale.quantity)
     
     # Calcular Splits con Alta Precisión (4 decimales soportados en BD)
     split_vendedor = (profit_val * Decimal('0.40'))
@@ -568,7 +736,7 @@ def update_sale(sale_id: int, sale: schemas.SaleCreateManual, db: Session = Depe
     db_sale.product_id = sale.product_id
     db_sale.product_name = db_product.name
     db_sale.quantity = sale.quantity
-    db_sale.purchase_price = sale.purchase_price
+    db_sale.purchase_price = actual_purchase_price
     db_sale.sale_price = sale.sale_price
     db_sale.seller = sale.seller
     db_sale.profit = profit_val
@@ -584,6 +752,8 @@ def update_sale(sale_id: int, sale: schemas.SaleCreateManual, db: Session = Depe
 
     # Descontar nuevo stock
     if db_sale.source == 'manual':
+        if db_product.stock < sale.quantity:
+            raise HTTPException(status_code=400, detail=f"Stock insuficiente para editar. Disponible: {db_product.stock}")
         db_product.stock -= sale.quantity
     
     db.commit()
@@ -711,8 +881,7 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
         func.sum(models.Sale.split_local).label('split_local_base'),
         func.sum(models.Sale.split_app).label('split_app_base'),
         func.sum(models.Sale.split_dev).label('split_dev_base'),
-        func.sum(models.Sale.split_company).label('split_company_base'),
-        func.sum(models.Sale.return_cost).label('return_cost_base')
+        func.sum(models.Sale.split_company).label('split_company_base')
     ).join(models.Product, models.Sale.product_id == models.Product.id, isouter=True).filter(
         extract('year', models.Sale.sale_date) == year_int,
         extract('month', models.Sale.sale_date) == month_int
@@ -748,10 +917,8 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
         # Esto hace que la suma de las columnas mostradas sea EXACTAMENTE igual a la utilidad de la fila.
         s_company = u - (s_seller + s_local + s_app + s_dev)
         
-        # 5. Devolución acumulada (Costo directo de CSV + Proporción de splits si aplica)
-        # Nota: split_dev se usa en manual, return_cost_base se usa en csv. 
-        # Sumamos ambos para la columna "DEVOLUCIÓN"
-        d = (Decimal(str(row.return_cost_base or 0)) + Decimal(str(row.split_dev_base or 0))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        # 5. Devolución base desde manual (split_dev). E-commerce se agrega desde sale_returns más abajo.
+        d = (Decimal(str(row.split_dev_base or 0))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         
         summary_data[prod] = {
             "product_name": prod,
@@ -767,6 +934,39 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
             "split_dev": float(s_dev),
             "split_company": float(s_company)
         }
+
+    # 1.5 Returns Aggregation (separada de sales para e-commerce)
+    returns_base = db.query(
+        models.SaleReturn.product_name,
+        func.sum(models.SaleReturn.return_cost).label('return_total')
+    ).filter(
+        extract('year', models.SaleReturn.return_date) == year_int,
+        extract('month', models.SaleReturn.return_date) == month_int
+    )
+
+    if source:
+        returns_base = returns_base.filter(models.SaleReturn.source == source)
+
+    returns_query = returns_base.group_by(models.SaleReturn.product_name).all()
+    for row in returns_query:
+        prod = row.product_name or "Producto sin nombre"
+        ret = float(Decimal(str(row.return_total or 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+        if prod not in summary_data:
+            summary_data[prod] = {
+                "product_name": prod,
+                "ventas": 0.0,
+                "proveedor": 0.0,
+                "logistica": 0.0,
+                "devolucion": 0.0,
+                "ads": 0.0,
+                "utilidad": 0.0,
+                "split_seller": 0.0,
+                "split_local": 0.0,
+                "split_app": 0.0,
+                "split_dev": 0.0,
+                "split_company": 0.0
+            }
+        summary_data[prod]["devolucion"] += ret
 
     # 2. Expenses Aggregation
     expenses_base = db.query(
