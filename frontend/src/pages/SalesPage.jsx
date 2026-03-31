@@ -12,6 +12,10 @@ const SalesPage = () => {
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+  });
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [productFilter, setProductFilter] = useState('');
@@ -46,7 +50,8 @@ const SalesPage = () => {
       const response = await salesApi.getSales(page, pagination.limit, {
         search: debouncedSearch,
         product: productFilter,
-        source: sourceFilter
+        source: sourceFilter,
+        month: selectedMonth
       });
       setSales(response.data);
       setPagination({
@@ -76,11 +81,11 @@ const SalesPage = () => {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [currentPage, debouncedSearch, productFilter, sourceFilter, pagination.limit]);
+  }, [currentPage, debouncedSearch, productFilter, sourceFilter, selectedMonth, pagination.limit]);
 
   useEffect(() => {
     fetchSales(currentPage);
-  }, [currentPage, debouncedSearch, productFilter, sourceFilter]);
+  }, [currentPage, debouncedSearch, productFilter, sourceFilter, selectedMonth]);
 
   // Handle successful manual record insertion or update
   const handleSaleSaved = () => {
@@ -207,6 +212,19 @@ const SalesPage = () => {
         </div>
         
         <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+          <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 p-1.5 rounded-lg shadow-sm">
+            <label className="text-xs font-semibold text-gray-600 uppercase tracking-wide px-2">Mes:</label>
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => {
+                setSelectedMonth(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="border-none bg-transparent focus:ring-0 text-sm font-bold text-gray-700 py-1"
+            />
+          </div>
+
           <button 
             onClick={fetchSales}
             disabled={isRefreshing}

@@ -7,10 +7,10 @@ export const salesApi = {
   /**
    * Fetch all delivered sales for the dashboard
    */
-  getSales: async (page = 1, limit = 50, { search = '', product = '', source = '' } = {}) => {
+  getSales: async (page = 1, limit = 50, { search = '', product = '', source = '', month = '' } = {}) => {
     try {
       const response = await axios.get(`${API_BASE_URL}/api/sales`, {
-        params: { page, limit, search, product, source }
+        params: { page, limit, search, product, source, month }
       });
       return response.data;
     } catch (error) {

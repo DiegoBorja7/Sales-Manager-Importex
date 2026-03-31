@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Numeric, Boolean, Date, DateTime, Index, text, ForeignKey
+from sqlalchemy import Column, Integer, String, Numeric, Boolean, Date, DateTime, Index, text, ForeignKey, UniqueConstraint
 from database import Base
 
 class StockMovement(Base):
@@ -46,14 +46,18 @@ class SaleReturn(Base):
     __tablename__ = "sale_returns"
     __table_args__ = (
         Index('ix_sale_returns_date_product', 'return_date', 'product_name'),
+        UniqueConstraint('external_id', 'product_name', name='uq_sale_returns_external_product'),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     return_date = Column(Date, index=True, nullable=False)
-    external_id = Column(String, unique=True, index=True, nullable=False)  # Dropi order identifier (e.g. #6452)
+    external_id = Column(String, index=True, nullable=False)  # Dropi order identifier (e.g. #6452)
     product_name = Column(String, nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
     quantity = Column(Integer, nullable=False, default=1)
+    gross_sale_amount = Column(Numeric(14, 4), nullable=False, default=0)
+    provider_cost_amount = Column(Numeric(14, 4), nullable=False, default=0)
+    shipping_cost_amount = Column(Numeric(14, 4), nullable=False, default=0)
     return_cost = Column(Numeric(14, 4), nullable=False, default=0)
     seller = Column(String, index=True, nullable=True)
     source = Column(String, nullable=False, default='csv')  # currently csv

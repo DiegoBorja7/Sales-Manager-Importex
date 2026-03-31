@@ -1,3 +1,12 @@
+from pathlib import Path
+import sys
+
+BACKEND_ROOT = Path(__file__).resolve().parent
+while BACKEND_ROOT.name != 'backend' and BACKEND_ROOT.parent != BACKEND_ROOT:
+    BACKEND_ROOT = BACKEND_ROOT.parent
+
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 import os
 from database import engine
 from sqlalchemy import text
@@ -19,3 +28,4 @@ with engine.connect() as conn:
         print(f"  Splits en DB (4 dec): {row.split_seller}, {row.split_local}, {row.split_app}, {row.split_dev}, {row.split_company}")
         sum_check = sum([row.split_seller, row.split_local, row.split_app, row.split_dev, row.split_company])
         print(f"  Sum exact: {sum_check} | Balanced: {sum_check == row.profit}")
+

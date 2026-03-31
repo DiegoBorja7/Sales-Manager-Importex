@@ -147,6 +147,7 @@ class MonthlySummaryProduct(BaseModel):
     split_app: float = 0.0
     split_dev: float = 0.0
     split_company: float = 0.0
+    cantidad: Optional[int] = 0
 
 class MonthlySummaryTotal(BaseModel):
     ventas_totales: float
@@ -161,3 +162,4 @@ class MonthlySummaryTotal(BaseModel):
     split_app_total: float = 0.0
     split_dev_total: float = 0.0
     split_company_total: float = 0.0
+    unidades_totales: Optional[int] = 0

@@ -28,7 +28,16 @@ const ExpenseForm = ({ onSuccess, onCancel, availableProducts = [], initialData 
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData(prev => {
+      const newState = { ...prev, [name]: value };
+      
+      // Smart defaulting: Ads are usually for E-commerce
+      if (name === 'category' && (value === 'Facebook Ads' || value === 'TikTok Ads')) {
+        newState.target_source = 'csv';
+      }
+      
+      return newState;
+    });
   };
 
   const handleSubmit = async (e) => {

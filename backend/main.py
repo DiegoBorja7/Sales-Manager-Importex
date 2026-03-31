@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List
@@ -256,10 +257,11 @@ def get_sales(
     search: str = "",
     product: str = "",
     source: str = "",
+    month: str = "",
     db: Session = Depends(get_db)
 ):
-    """Retrieve paginated sales with server-side search and filters."""
-    from sqlalchemy import func, cast, String
+    """Retrieve paginated sales with server-side search and filters, including month (YYYY-MM)."""
+    from sqlalchemy import func, cast, String, extract
     
     # Ensure valid pagination params
     page = max(1, page)
@@ -267,6 +269,21 @@ def get_sales(
     
     # Base query
     base_query = db.query(models.Sale)
+
+    # Apply month filter (YYYY-MM)
+    month_year = None
+    month_number = None
+    if month.strip():
+        try:
+            year_str, month_str = month.strip().split("-")
+            month_year = int(year_str)
+            month_number = int(month_str)
+            base_query = base_query.filter(
+                extract("year", models.Sale.sale_date) == month_year,
+                extract("month", models.Sale.sale_date) == month_number
+            )
+        except ValueError:
+            pass
     
     # Apply search filter (ILIKE across multiple columns)
     if search.strip():
@@ -303,6 +320,11 @@ def get_sales(
         func.coalesce(func.sum(models.Sale.quantity), 0).label('items')
     )
     # Re-apply same filters to metrics
+    if month_year is not None and month_number is not None:
+        metrics_query = metrics_query.filter(
+            extract("year", models.Sale.sale_date) == month_year,
+            extract("month", models.Sale.sale_date) == month_number
+        )
     if search.strip():
         search_term = f"%{search.strip()}%"
         metrics_query = metrics_query.filter(
@@ -317,11 +339,30 @@ def get_sales(
     
     metrics_row = metrics_query.first()
     
-    # Get unique products and sources for frontend dropdowns
-    all_products = [r[0] for r in db.query(models.Sale.product_name).distinct().order_by(models.Sale.product_name).all()]
-    all_sources = [r[0] for r in db.query(models.Sale.source).distinct().order_by(models.Sale.source).all()]
+    # Get unique products and sources for frontend dropdowns (scoped to selected month if provided)
+    options_query = db.query(models.Sale)
+    if month_year is not None and month_number is not None:
+        options_query = options_query.filter(
+            extract("year", models.Sale.sale_date) == month_year,
+            extract("month", models.Sale.sale_date) == month_number
+        )
+
+    all_products = [
+        r[0]
+        for r in options_query.with_entities(models.Sale.product_name)
+        .distinct()
+        .order_by(models.Sale.product_name)
+        .all()
+    ]
+    all_sources = [
+        r[0]
+        for r in options_query.with_entities(models.Sale.source)
+        .distinct()
+        .order_by(models.Sale.source)
+        .all()
+    ]
     
-    logger.info(f"GET /api/sales | page={page} limit={limit} search='{search}' product='{product}' source='{source}' → {total} results")
+    logger.info(f"GET /api/sales | page={page} limit={limit} month='{month}' search='{search}' product='{product}' source='{source}' → {total} results")
     
     return schemas.PaginatedSalesResponse(
         data=sales,
@@ -524,6 +565,9 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
                         product_name=final_product_name,
                         product_id=None,
                         quantity=qty_val,
+                        gross_sale_amount=clean_money(row.get(mapped_columns.get('sale_price'))) if mapped_columns.get('sale_price') else Decimal('0.00'),
+                        provider_cost_amount=clean_money(row.get(mapped_columns.get('purchase_price'))) if mapped_columns.get('purchase_price') else Decimal('0.00'),
+                        shipping_cost_amount=clean_money(row.get(mapped_columns.get('shipping_cost'))) if mapped_columns.get('shipping_cost') else Decimal('0.00'),
                         return_cost=return_cost_val,
                         seller=str(row.get(mapped_columns.get('seller'))).strip() if mapped_columns.get('seller') and pd.notna(row.get(mapped_columns.get('seller'))) else None,
                         source='csv',
@@ -647,28 +691,40 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     if parsed_returns:
         unique_returns = {}
         for row_number, return_obj in parsed_returns:
-            ext_id = return_obj.external_id
-            if ext_id in unique_returns:
-                _, prev_obj = unique_returns[ext_id]
-                # Consolidate duplicates by keeping the highest return cost
-                if return_obj.return_cost >= prev_obj.return_cost:
-                    unique_returns[ext_id] = (row_number, return_obj)
+            key = (return_obj.external_id, return_obj.product_name)
+            if key in unique_returns:
+                _, prev_obj = unique_returns[key]
+                # Consolidate duplicates for same order+product by summing return cost.
+                prev_obj.return_cost = Decimal(str(prev_obj.return_cost or 0)) + Decimal(str(return_obj.return_cost or 0))
+                prev_obj.quantity = int(prev_obj.quantity or 0) + int(return_obj.quantity or 0)
+                if return_obj.return_date and (not prev_obj.return_date or return_obj.return_date > prev_obj.return_date):
+                    prev_obj.return_date = return_obj.return_date
+                if return_obj.seller:
+                    prev_obj.seller = return_obj.seller
+                if return_obj.raw_status:
+                    prev_obj.raw_status = return_obj.raw_status
             else:
-                unique_returns[ext_id] = (row_number, return_obj)
+                unique_returns[key] = (row_number, return_obj)
 
-        incoming_return_ids = list(unique_returns.keys())
-        db_existing_returns = {
-            r.external_id: r for r in db.query(models.SaleReturn)
-            .filter(models.SaleReturn.external_id.in_(incoming_return_ids))
-            .all()
-        }
+        incoming_return_keys = list(unique_returns.keys())
+        db_existing_returns = {}
+        if incoming_return_keys:
+            existing_returns_rows = db.query(models.SaleReturn).filter(
+                tuple_(models.SaleReturn.external_id, models.SaleReturn.product_name).in_(incoming_return_keys)
+            ).all()
+            db_existing_returns = {
+                (r.external_id, r.product_name): r for r in existing_returns_rows
+            }
 
-        for _, return_in in unique_returns.values():
-            if return_in.external_id in db_existing_returns:
-                db_ret = db_existing_returns[return_in.external_id]
+        for return_key, (_, return_in) in unique_returns.items():
+            if return_key in db_existing_returns:
+                db_ret = db_existing_returns[return_key]
                 db_ret.return_date = return_in.return_date
                 db_ret.product_name = return_in.product_name
                 db_ret.quantity = return_in.quantity
+                db_ret.gross_sale_amount = return_in.gross_sale_amount
+                db_ret.provider_cost_amount = return_in.provider_cost_amount
+                db_ret.shipping_cost_amount = return_in.shipping_cost_amount
                 db_ret.return_cost = return_in.return_cost
                 db_ret.seller = return_in.seller
                 db_ret.raw_status = return_in.raw_status
@@ -681,10 +737,10 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        logger.error(f"CSV upsert | Violación de unicidad external_id: {str(e)}")
+        logger.error(f"CSV upsert | Violación de unicidad en returns (external_id + product_name): {str(e)}")
         raise HTTPException(
             status_code=409,
-            detail="Se detectaron external_id duplicados durante el guardado. Revisa si el archivo contiene pedidos repetidos."
+            detail="Se detectaron conflictos de unicidad en devoluciones (pedido + producto) durante el guardado."
         )
 
     total_imported = new_sales_count + new_returns_count
@@ -875,6 +931,7 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
     sales_base = db.query(
         func.coalesce(models.Product.name, models.Sale.product_name).label('product_name'),
         func.sum(models.Sale.sale_price).label('ventas'),
+        func.sum(models.Sale.quantity).label('cantidad_base'),
         func.sum(models.Sale.purchase_price * models.Sale.quantity).label('proveedor_base'),
         func.sum(models.Sale.shipping_cost).label('logistica_base'),
         func.sum(models.Sale.split_seller).label('split_seller_base'),
@@ -903,6 +960,7 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
         v = Decimal(str(row.ventas or 0))
         p = Decimal(str(row.proveedor_base or 0))
         l = Decimal(str(row.logistica_base or 0))
+        q = int(row.cantidad_base or 0)
         
         # 2. Calcular Utilidad de la fila (Redondeada a 2 decimales para el reporte)
         u = (v - p - l).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
@@ -923,6 +981,7 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
         summary_data[prod] = {
             "product_name": prod,
             "ventas": float(v),
+            "cantidad": q,
             "proveedor": float(p),
             "logistica": float(l),
             "devolucion": float(d),
@@ -938,6 +997,10 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
     # 1.5 Returns Aggregation (separada de sales para e-commerce)
     returns_base = db.query(
         models.SaleReturn.product_name,
+        func.sum(models.SaleReturn.quantity).label('quantity_total'),
+        func.sum(models.SaleReturn.gross_sale_amount).label('sales_total'),
+        func.sum(models.SaleReturn.provider_cost_amount).label('provider_total'),
+        func.sum(models.SaleReturn.shipping_cost_amount).label('shipping_total'),
         func.sum(models.SaleReturn.return_cost).label('return_total')
     ).filter(
         extract('year', models.SaleReturn.return_date) == year_int,
@@ -950,11 +1013,16 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
     returns_query = returns_base.group_by(models.SaleReturn.product_name).all()
     for row in returns_query:
         prod = row.product_name or "Producto sin nombre"
+        ret_qty = int(row.quantity_total or 0)
+        ret_sales = float(Decimal(str(row.sales_total or 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+        ret_provider = float(Decimal(str(row.provider_total or 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+        ret_shipping = float(Decimal(str(row.shipping_total or 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
         ret = float(Decimal(str(row.return_total or 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
         if prod not in summary_data:
             summary_data[prod] = {
                 "product_name": prod,
                 "ventas": 0.0,
+                "cantidad": 0,
                 "proveedor": 0.0,
                 "logistica": 0.0,
                 "devolucion": 0.0,
@@ -966,6 +1034,10 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
                 "split_dev": 0.0,
                 "split_company": 0.0
             }
+        summary_data[prod]["ventas"] += ret_sales
+        summary_data[prod]["cantidad"] += ret_qty
+        summary_data[prod]["proveedor"] += ret_provider
+        summary_data[prod]["logistica"] += ret_shipping
         summary_data[prod]["devolucion"] += ret
 
     # 2. Expenses Aggregation
@@ -988,6 +1060,7 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
     general_expenses = {
         "product_name": "Gastos Generales / Sin Asignar",
         "ventas": 0.0,
+        "cantidad": 0,
         "proveedor": 0.0,
         "logistica": 0.0,
         "devolucion": 0.0,
@@ -1009,6 +1082,7 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
                 summary_data[prod] = {
                     "product_name": prod,
                     "ventas": 0.0,
+                    "cantidad": 0,
                     "proveedor": 0.0,
                     "logistica": 0.0,
                     "devolucion": 0.0,
@@ -1062,7 +1136,8 @@ def get_monthly_summary_total(month: str, source: str = None, db: Session = Depe
         split_local_total=0.0,
         split_app_total=0.0,
         split_dev_total=0.0,
-        split_company_total=0.0
+        split_company_total=0.0,
+        unidades_totales=0
     )
     
     for p in products:
@@ -1072,6 +1147,7 @@ def get_monthly_summary_total(month: str, source: str = None, db: Session = Depe
         total.devolucion_total += p["devolucion"]
         total.ads_total += p["ads"]
         total.utilidad_real += p["utilidad"]
+        total.unidades_totales += int(p.get("cantidad", 0) or 0)
         
         # Sumar los splits ya reconciliados y redondeados de cada producto
         total.split_seller_total += p.get("split_seller", 0)

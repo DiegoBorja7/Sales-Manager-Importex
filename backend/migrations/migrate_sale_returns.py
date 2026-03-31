@@ -20,10 +20,13 @@ def migrate_sale_returns():
                 CREATE TABLE IF NOT EXISTS sale_returns (
                     id SERIAL PRIMARY KEY,
                     return_date DATE NOT NULL,
-                    external_id VARCHAR NOT NULL UNIQUE,
+                    external_id VARCHAR NOT NULL,
                     product_name VARCHAR NOT NULL,
                     product_id INTEGER NULL REFERENCES products(id),
                     quantity INTEGER NOT NULL DEFAULT 1,
+                    gross_sale_amount NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    provider_cost_amount NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    shipping_cost_amount NUMERIC(14,4) NOT NULL DEFAULT 0,
                     return_cost NUMERIC(14,4) NOT NULL DEFAULT 0,
                     seller VARCHAR NULL,
                     source VARCHAR NOT NULL DEFAULT 'csv',
@@ -33,28 +36,40 @@ def migrate_sale_returns():
                 );
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sale_returns_date_product ON sale_returns (return_date, product_name);"))
+            conn.execute(text("ALTER TABLE sale_returns DROP CONSTRAINT IF EXISTS sale_returns_external_id_key;"))
+            conn.execute(text("ALTER TABLE sale_returns DROP CONSTRAINT IF EXISTS uq_sale_returns_external_id;"))
+            conn.execute(text("DROP INDEX IF EXISTS ix_sale_returns_external_id;"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sale_returns_external_id ON sale_returns (external_id);"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_sale_returns_external_product ON sale_returns (external_id, product_name);"))
+            conn.execute(text("ALTER TABLE sale_returns ADD COLUMN IF NOT EXISTS gross_sale_amount NUMERIC(14,4) NOT NULL DEFAULT 0;"))
+            conn.execute(text("ALTER TABLE sale_returns ADD COLUMN IF NOT EXISTS provider_cost_amount NUMERIC(14,4) NOT NULL DEFAULT 0;"))
+            conn.execute(text("ALTER TABLE sale_returns ADD COLUMN IF NOT EXISTS shipping_cost_amount NUMERIC(14,4) NOT NULL DEFAULT 0;"))
 
             # 2) Backfill historical CSV return_cost from sales (if any)
             conn.execute(text("""
                 INSERT INTO sale_returns (
                     return_date, external_id, product_name, product_id, quantity,
+                    gross_sale_amount, provider_cost_amount, shipping_cost_amount,
                     return_cost, seller, source, raw_status
                 )
                 SELECT
                     sale_date, external_id, product_name, product_id, quantity,
+                    sale_price, (purchase_price * quantity), shipping_cost,
                     return_cost, seller, 'csv', 'BACKFILL_FROM_SALES'
                 FROM sales
                 WHERE source = 'csv'
                   AND external_id IS NOT NULL
                   AND TRIM(external_id) <> ''
                   AND COALESCE(return_cost, 0) > 0
-                ON CONFLICT (external_id)
+                ON CONFLICT (external_id, product_name)
                 DO UPDATE SET
                     return_date = EXCLUDED.return_date,
                     product_name = EXCLUDED.product_name,
                     product_id = EXCLUDED.product_id,
                     quantity = EXCLUDED.quantity,
+                    gross_sale_amount = EXCLUDED.gross_sale_amount,
+                    provider_cost_amount = EXCLUDED.provider_cost_amount,
+                    shipping_cost_amount = EXCLUDED.shipping_cost_amount,
                     return_cost = EXCLUDED.return_cost,
                     seller = EXCLUDED.seller,
                     source = EXCLUDED.source,

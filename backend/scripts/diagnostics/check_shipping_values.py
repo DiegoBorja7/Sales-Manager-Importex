@@ -1,3 +1,12 @@
+from pathlib import Path
+import sys
+
+BACKEND_ROOT = Path(__file__).resolve().parent
+while BACKEND_ROOT.name != 'backend' and BACKEND_ROOT.parent != BACKEND_ROOT:
+    BACKEND_ROOT = BACKEND_ROOT.parent
+
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 import os
 from database import engine
 from sqlalchemy import text
@@ -16,3 +25,4 @@ with engine.connect() as conn:
     sql3 = "SELECT count(*) FROM sales WHERE source = 'csv' AND shipping_cost = 0;"
     count0 = conn.execute(text(sql3)).scalar()
     print(f"Total ventas CSV con envío 0: {count0}")
+

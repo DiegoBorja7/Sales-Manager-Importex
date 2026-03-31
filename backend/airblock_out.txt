@@ -1,2 +1,0 @@
-Resultados de AirBlock Pro en CSV:
-(622, datetime.date(2026, 3, 20), 'AirBlock Pro™', 4, Decimal('11.40'), Decimal('33.00'), Decimal('-12.60'))
