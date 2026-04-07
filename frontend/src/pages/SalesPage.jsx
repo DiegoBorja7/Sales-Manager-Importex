@@ -4,14 +4,13 @@ import { salesApi } from '../services/salesApi';
 import SalesTable from '../components/SalesTable';
 import SalesForm from '../components/SalesForm';
 import ConfirmModal from '../components/ConfirmModal';
-import { PlusCircle, FileSpreadsheet, RefreshCw, DollarSign, Package, Search, Filter, X } from 'lucide-react';
+import { PlusCircle, RefreshCw, DollarSign, Package, Search, Filter, X } from 'lucide-react';
 
 const SalesPage = () => {
   const [sales, setSales] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const today = new Date();
     return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
@@ -32,7 +31,6 @@ const SalesPage = () => {
   const [saleToDelete, setSaleToDelete] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   
-  const fileInputRef = useRef(null);
 
   // Debounce search input (400ms delay before hitting server)
   useEffect(() => {
@@ -124,46 +122,6 @@ const SalesPage = () => {
   };
 
   // UI/UX: Derived Metrics for the Dashboard
-  const handleFileUpload = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    if (!file.name.endsWith('.csv')) {
-      toast.error('Por favor selecciona un archivo .csv válido');
-      return;
-    }
-
-    try {
-      setIsUploading(true);
-      const loadingToast = toast.loading('Procesando archivo CSV...');
-      
-      const response = await salesApi.uploadCsv(file);
-      
-      toast.dismiss(loadingToast);
-      
-      if (response.total_imported > 0) {
-        toast.success(`¡Éxito! Se importaron ${response.total_imported} ventas nuevas.`);
-        fetchSales(); // Recargar tabla
-      } else if (response.total_ignored > 0 && response.total_errors === 0) {
-        toast.success(`Archivo procesado. ${response.total_ignored} filas ignoradas (no entregadas). No hubo errores.`);
-      } else {
-        toast.error(`Importación completada con errores. Revisa la consola.`);
-      }
-
-      if (response.total_errors > 0) {
-        toast.error(`Omitimos ${response.total_errors} filas defectuosas o duplicadas.`);
-        console.warn('Detalles de errores CSV:', response.error_details);
-      }
-      
-    } catch (error) {
-      toast.dismiss();
-      toast.error(error.response?.data?.detail || 'Error crítico al subir el archivo CSV.');
-    } finally {
-      setIsUploading(false);
-      // Reset input para permitir subir el mismo archivo otra vez si se corrió
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
 
   const hasActiveFilters = debouncedSearch || productFilter || sourceFilter;
 
@@ -234,28 +192,7 @@ const SalesPage = () => {
             <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin text-blue-600' : ''}`} />
           </button>
           
-          <button 
-            disabled={isUploading}
-            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-white text-gray-700 font-medium px-4 py-2.5 rounded-xl border border-gray-200 hover:border-gray-300 hover:bg-gray-50 transition-all shadow-sm hover:shadow disabled:opacity-50"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            {isUploading ? (
-              <span className="w-4 h-4 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin"></span>
-            ) : (
-              <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            )}
-            <span className="hidden sm:inline">{isUploading ? 'Procesando...' : 'Importar CSV'}</span>
-            <span className="sm:hidden">CSV</span>
-          </button>
-          
-          <input 
-            type="file" 
-            accept=".csv"
-            className="hidden" 
-            ref={fileInputRef}
-            onChange={handleFileUpload}
-          />
-          
+
           <button 
             onClick={() => {
               setEditingSale(null); // Ensure we open a clean form
@@ -269,6 +206,7 @@ const SalesPage = () => {
           </button>
         </div>
       </div>
+
 
       {/* Metrics Cards (KPIs) */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 lg:gap-6">

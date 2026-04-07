@@ -1,0 +1,29 @@
+--- ENTREGADOS (Sales Accounted) ---
+Count: 384
+Ventas (Total): 9501.47
+Proveedor (Total): 2371.10
+Logistica (Total): 2236.87
+
+--- RETURNS (Return Lane: CST DEV > 0) ---
+Count: 123
+Return Gross Sales: 9501.47
+Return Provider Cost: 2371.10
+Return Shipping Cost: 2236.87
+Return Cost (CST DEV): 1291.08
+
+--- DASHBOARD EXPECTED TOTALS (If backend logic used) ---
+Dashboard Ventas: 19002.94
+Dashboard Proveedor: 4742.20
+Dashboard Logistica: 4473.74
+Dashboard Devolucion: 1291.08
+
+--- PM EXCEL REFERENCE (February) ---
+Excel Ventas: 9501.47
+Excel Proveedor: 2371.1
+Excel Logistica: 2236.87
+Excel Devolucion: 645.54
+
+--- PRODUCT: FilmPro Analysis ---
+FilmPro Entregado Ventas: 4990.00
+FilmPro Return Ventas: 0.00
+FilmPro Dashboard Total Ventas: 4990.00

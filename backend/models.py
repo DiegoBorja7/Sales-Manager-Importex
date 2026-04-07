@@ -94,3 +94,19 @@ class Expense(Base):
     target_source = Column(String, default="global", nullable=False) # 'global', 'csv', 'manual'
     created_at = Column(DateTime, server_default=text("NOW()"))
     updated_at = Column(DateTime, server_default=text("NOW()"), onupdate=text("NOW()"))
+
+class MonthlyStatusCount(Base):
+    __tablename__ = "monthly_status_counts"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    month = Column(String(7), unique=True, index=True, nullable=False) # e.g. '2026-02'
+    entregados = Column(Integer, nullable=False, default=0)
+    devoluciones = Column(Integer, nullable=False, default=0)
+    pendientes = Column(Integer, nullable=False, default=0)
+    cancelados = Column(Integer, nullable=False, default=0)
+    novedades = Column(Integer, nullable=False, default=0)
+    proceso = Column(Integer, nullable=False, default=0)
+    revisar = Column(Integer, nullable=False, default=0)
+    otros = Column(Integer, nullable=False, default=0)
+    total_pedidos = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, server_default=text("NOW()"), onupdate=text("NOW()"))

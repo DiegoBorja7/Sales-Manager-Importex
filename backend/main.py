@@ -13,12 +13,19 @@ import time
 from decimal import Decimal
 
 # ── Logger Setup ──
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+# NOTE: logging.basicConfig() is ignored by uvicorn which configures its own logging.
+# Instead we attach a StreamHandler directly to our named logger so it always outputs.
 logger = logging.getLogger("importex")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setLevel(logging.INFO)
+    _handler.setFormatter(logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    logger.addHandler(_handler)
+    logger.propagate = False  # prevent duplicate output via uvicorn root logger
 
 import models
 import schemas
@@ -69,31 +76,49 @@ def clean_money(val):
 
 def read_flexible_csv(contents: bytes) -> pd.DataFrame:
     """
-    Read CSV robustly, including exports where a full row is wrapped in quotes.
-    Example problematic row:
-      "1,1/02/2026,...,""4,70"",..."
+    Read CSV robustly, handling known Google Sheets export quirks:
+    
+    Quirk 1: Multiline fields. Google Sheets may export fields with internal
+    newlines (e.g., "Angel Acosta\n"). Naive splitlines() corrupts the CSV
+    structure. We use io.StringIO to let csv.reader handle quoted newlines
+    natively.
+    
+    Quirk 2: Entire row wrapped in outer quotes:
+    "1,1/02/2026,...,""4,70"",..."
+    → Parses as a single field; we detect and re-parse the inner payload.
+    
+    Quirk 3: Leading empty quoted field (field[0] == ''):
+    If after parse the field[0] is empty and we have >= n_cols, we pop it off
+    to avoid column shifting.
     """
+    import io
+    import csv
     text = contents.decode('utf-8-sig', errors='replace')
-    lines = [line for line in text.splitlines() if line.strip()]
-    if not lines:
+    
+    reader = csv.reader(io.StringIO(text))
+    raw_rows = list(reader)
+    if not raw_rows:
         return pd.DataFrame()
 
-    # Header parse
-    header = next(csv.reader([lines[0]]))
+    # Header
+    header = raw_rows[0]
+    n_cols = len(header)
     rows = []
 
-    for line in lines[1:]:
-        parsed = next(csv.reader([line]))
-
-        # If entire row is a single quoted blob, parse the inner payload one more time.
+    for parsed in raw_rows[1:]:
+        # Pattern 1: whole row is a single quoted blob.
         if len(parsed) == 1 and ',' in parsed[0]:
             parsed = next(csv.reader([parsed[0]]))
 
-        # Normalize row length to header width
-        if len(parsed) < len(header):
-            parsed += [''] * (len(header) - len(parsed))
-        elif len(parsed) > len(header):
-            parsed = parsed[:len(header)]
+        # Pattern 2: leading empty field shifting columns.
+        if parsed and parsed[0] == '' and len(parsed) >= n_cols:
+            parsed = parsed[1:]
+
+        # Normalize width.
+        if len(parsed) < n_cols:
+            parsed += [''] * (n_cols - len(parsed))
+        elif len(parsed) > n_cols:
+            parsed = parsed[:n_cols]
 
         rows.append(parsed)
 
@@ -464,7 +489,7 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     aliases = {
         # Business key for Dropi orders: prefer order number (#PEDIDO) to preserve historical dedupe.
         'external_id': ['#_pedido', 'pedido', 'numero_de_pedido', 'order_id', 'id'],
-        'sale_date': ['fecha', 'sale_date', 'fecha_venta', 'fecha_de_confirmacion', 'fecha_confirmacion', 'fehca_de_confirmacion', 'n', 'n°'],
+        'sale_date': ['fecha', 'sale_date', 'fecha_venta', 'fecha_de_confirmacion', 'fecha_confirmacion', 'fehca_de_confirmacion'],
         'product_name': ['producto', 'product_name', 'articulo', 'nombre_producto', 'producto_'],
         'quantity': ['cantidad', 'quantity', 'cant'],
         'purchase_price': ['costo_proveedor', 'costo', 'costo_prov', 'precio_compra', 'purchase_price', 'costo_provedor'],
@@ -514,6 +539,9 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
     # ── PHASE 1: Parse and validate rows in two lanes (sales + returns) ──
     parsed_sales = []    # List[(row_number, Sale)]
     parsed_returns = []  # List[(row_number, SaleReturn)]
+    
+    # Tracking for Global Logistics KPIs
+    status_counts_by_month = {}
 
     for index, row in df.iterrows():
         row_number = index + 2
@@ -521,6 +549,41 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
         estado_norm = estado_raw.lower()
         external_id_val = resolve_external_id(row)
         row_accounted = False
+
+        # --- Logistics KPI Tracking ---
+        sale_date_val_kpi = row.get(mapped_columns.get('sale_date'))
+        month_key = None
+        if pd.notna(sale_date_val_kpi):
+            try:
+                dt_parsed = pd.to_datetime(sale_date_val_kpi, dayfirst=True).date()
+                month_key = f"{dt_parsed.year}-{str(dt_parsed.month).zfill(2)}"
+            except Exception:
+                pass
+        
+        if month_key:
+            if month_key not in status_counts_by_month:
+                status_counts_by_month[month_key] = {
+                    "entregados": 0, "devoluciones": 0, "pendientes": 0, "cancelados": 0,
+                    "novedades": 0, "proceso": 0, "revisar": 0, "otros": 0, "total_pedidos": 0
+                }
+            status_counts_by_month[month_key]["total_pedidos"] += 1
+            if 'entregado' in estado_norm or 'entrega' in estado_norm:
+                status_counts_by_month[month_key]["entregados"] += 1
+            elif 'devolucion' in estado_norm or 'devuelto' in estado_norm:
+                status_counts_by_month[month_key]["devoluciones"] += 1
+            elif 'pendiente' in estado_norm:
+                status_counts_by_month[month_key]["pendientes"] += 1
+            elif 'cancelado' in estado_norm:
+                status_counts_by_month[month_key]["cancelados"] += 1
+            elif 'novedad' in estado_norm:
+                status_counts_by_month[month_key]["novedades"] += 1
+            elif 'proceso' in estado_norm or 'empacad' in estado_norm:
+                status_counts_by_month[month_key]["proceso"] += 1
+            elif 'revisar' in estado_norm:
+                status_counts_by_month[month_key]["revisar"] += 1
+            else:
+                status_counts_by_month[month_key]["otros"] += 1
+        # ------------------------------
 
         # Return lane by value (source of truth = CST DEV > 0), independent from estado quality.
         return_cost_val = clean_money(row.get(mapped_columns.get('return_cost'))) if mapped_columns.get('return_cost') else Decimal('0.00')
@@ -603,8 +666,9 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
                 except Exception:
                     raise ValueError("Formato numérico inválido en cantidad, precios o envío.")
 
-                parsed_unit_purchase_price = raw_csv_total_cost / parsed_quantity if parsed_quantity > 0 else raw_csv_total_cost
-                # Devolución ya NO pertenece a la tabla de ventas e-commerce.
+                # NOTA: Para CSV guardamos el COSTO TOTAL del proveedor (no unitario).
+                # Dividir por cantidad y re-multiplicar en la query introduce error de redondeo de $0.01.
+                # El summary query usa CASE para CSV: SUM(purchase_price) directamente.
                 parsed_return_cost = Decimal('0.00')
                 profit_val = parsed_sale_price - raw_csv_total_cost - parsed_shipping_cost - parsed_return_cost
                 ext_id = external_id_val if external_id_val else f"CSV-MISSING-ID-{uuid.uuid4()}"
@@ -615,7 +679,7 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
                     product_id=None,
                     product_name=final_product_name,
                     quantity=parsed_quantity,
-                    purchase_price=parsed_unit_purchase_price,
+                    purchase_price=raw_csv_total_cost,  # ← total, no unit price
                     sale_price=parsed_sale_price,
                     shipping_cost=parsed_shipping_cost,
                     return_cost=parsed_return_cost,
@@ -673,10 +737,16 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
         for _, sale_in in unique_sales.values():
             if sale_in.external_id in db_existing_sales:
                 db_sale = db_existing_sales[sale_in.external_id]
-                db_sale.sale_date = sale_in.sale_date
+                # Política: El mes contable original prevalece.
+                # Si el nuevo CSV trae una fecha posterior que lo movería a otro mes, lo ignoramos para proteger el histórico.
+                # Si el nuevo CSV trae una fecha anterior, permitimos "corregir" hacia atrás.
+                if (sale_in.sale_date.year < db_sale.sale_date.year) or \
+                   (sale_in.sale_date.year == db_sale.sale_date.year and sale_in.sale_date.month <= db_sale.sale_date.month):
+                    db_sale.sale_date = sale_in.sale_date
+                
                 db_sale.product_name = sale_in.product_name
                 db_sale.quantity = sale_in.quantity
-                db_sale.purchase_price = sale_in.purchase_price
+                db_sale.purchase_price = sale_in.purchase_price  # total cost (not unit)
                 db_sale.sale_price = sale_in.sale_price
                 db_sale.shipping_cost = sale_in.shipping_cost
                 db_sale.return_cost = Decimal('0.00')
@@ -719,7 +789,11 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
         for return_key, (_, return_in) in unique_returns.items():
             if return_key in db_existing_returns:
                 db_ret = db_existing_returns[return_key]
-                db_ret.return_date = return_in.return_date
+                # Política: 'Oldest Month Wins'. Evita que una devolución de Feb salte a Mar si aparece en el reporte de Mar con fecha actualizada.
+                if (return_in.return_date.year < db_ret.return_date.year) or \
+                   (return_in.return_date.year == db_ret.return_date.year and return_in.return_date.month <= db_ret.return_date.month):
+                    db_ret.return_date = return_in.return_date
+                
                 db_ret.product_name = return_in.product_name
                 db_ret.quantity = return_in.quantity
                 db_ret.gross_sale_amount = return_in.gross_sale_amount
@@ -732,6 +806,22 @@ async def upload_sales_csv(file: UploadFile = File(...), db: Session = Depends(g
             else:
                 db.add(return_in)
                 new_returns_count += 1
+
+    # ── PHASE 3: Upsert Logistics Tracking Metrics ──
+    for month_key, counts in status_counts_by_month.items():
+        db_stat = db.query(models.MonthlyStatusCount).filter(models.MonthlyStatusCount.month == month_key).first()
+        if not db_stat:
+            db_stat = models.MonthlyStatusCount(month=month_key)
+            db.add(db_stat)
+        db_stat.entregados = counts["entregados"]
+        db_stat.devoluciones = counts["devoluciones"]
+        db_stat.pendientes = counts["pendientes"]
+        db_stat.cancelados = counts["cancelados"]
+        db_stat.novedades = counts["novedades"]
+        db_stat.proceso = counts["proceso"]
+        db_stat.revisar = counts["revisar"]
+        db_stat.otros = counts["otros"]
+        db_stat.total_pedidos = counts["total_pedidos"]
 
     try:
         db.commit()
@@ -928,11 +1018,20 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
     from sqlalchemy import extract
     from sqlalchemy import func
     
+    from sqlalchemy import case as sa_case
+
     sales_base = db.query(
         func.coalesce(models.Product.name, models.Sale.product_name).label('product_name'),
         func.sum(models.Sale.sale_price).label('ventas'),
         func.sum(models.Sale.quantity).label('cantidad_base'),
-        func.sum(models.Sale.purchase_price * models.Sale.quantity).label('proveedor_base'),
+        # CSV: purchase_price = costo total (no dividir de nuevo → evita error de redondeo $0.01)
+        # Manual: purchase_price = precio unitario → multiplicar por cantidad
+        func.sum(
+            sa_case(
+                (models.Sale.source == 'csv', models.Sale.purchase_price),
+                else_=models.Sale.purchase_price * models.Sale.quantity
+            )
+        ).label('proveedor_base'),
         func.sum(models.Sale.shipping_cost).label('logistica_base'),
         func.sum(models.Sale.split_seller).label('split_seller_base'),
         func.sum(models.Sale.split_local).label('split_local_base'),
@@ -1034,7 +1133,9 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
                 "split_dev": 0.0,
                 "split_company": 0.0
             }
-        summary_data[prod]["ventas"] += ret_sales
+        # IMPORTANTE: No sumamos ret_sales a la columna "ventas". 
+        # La columna "ventas" debe reflejar solo pedidos ENTREGADOS (Net Sales accounting).
+        # summary_data[prod]["ventas"] += ret_sales  <-- ELIMINADO para coincidir con Excel PM
         summary_data[prod]["cantidad"] += ret_qty
         summary_data[prod]["proveedor"] += ret_provider
         summary_data[prod]["logistica"] += ret_shipping
@@ -1091,17 +1192,17 @@ def get_monthly_summary(month: str, source: str = None, db: Session = Depends(ge
                 }
             target_dict = summary_data[prod]
 
-        # Map categories
-        if 'log' in cat:
+        # Map expense category → columna de costo
+        # IMPORTANTE: 'devolucion' en resumen = devoluciones REALES de ventas (CSV/sale_returns).
+        # Gastos de categoría "Devoluciones" son costos operativos → van a Logística.
+        if 'log' in cat or 'dev' in cat:
             target_dict["logistica"] += amt
-        elif 'dev' in cat:
-            target_dict["devolucion"] += amt
         elif 'ad' in cat or 'facebook' in cat or 'tik tok' in cat:
             target_dict["ads"] += amt
         elif 'prov' in cat or 'prima' in cat:
             target_dict["proveedor"] += amt
         else:
-            target_dict["logistica"] += amt # Fallback para gastos varios
+            target_dict["logistica"] += amt  # Fallback: Generales, Imprevistos, etc.
 
     # 3. Calculate Real Profit
     results = []
@@ -1157,3 +1258,88 @@ def get_monthly_summary_total(month: str, source: str = None, db: Session = Depe
         total.split_company_total += p.get("split_company", 0)
             
     return total
+
+# ==========================================
+# TREND ENDPOINT (for line chart)
+# ==========================================
+
+@app.get('/api/summary/trend')
+def get_summary_trend(months: int = 6, source: str = None, anchor: str = None, db: Session = Depends(get_db)):
+    """
+    Returns financial totals for the last N months (for trend line chart).
+    anchor: 'YYYY-MM' to use as end month. Defaults to current month.
+    Returns list of { month, label, ventas, costos, utilidad }
+    """
+    import datetime as dt
+
+    if anchor:
+        try:
+            year_str, month_str = anchor.split('-')
+            end_date = dt.date(int(year_str), int(month_str), 1)
+        except Exception:
+            end_date = dt.date.today().replace(day=1)
+    else:
+        end_date = dt.date.today().replace(day=1)
+
+    month_labels_es = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+
+    def subtract_months(d, n):
+        month = d.month - n
+        year = d.year
+        while month <= 0:
+            month += 12
+            year -= 1
+        return dt.date(year, month, 1)
+
+    results = []
+    for i in range(months - 1, -1, -1):
+        target = subtract_months(end_date, i)
+        month_str = f"{target.year}-{str(target.month).zfill(2)}"
+        try:
+            total = get_monthly_summary_total(month_str, source, db)
+            costos = (
+                float(total.proveedor_total or 0)
+                + float(total.logistica_total or 0)
+                + float(total.devolucion_total or 0)
+                + float(total.ads_total or 0)
+            )
+            results.append({
+                "month": month_str,
+                "label": f"{month_labels_es[target.month - 1]} {str(target.year)[-2:]}",
+                "ventas": round(float(total.ventas_totales or 0), 2),
+                "costos": round(costos, 2),
+                "utilidad": round(float(total.utilidad_real or 0), 2),
+            })
+        except Exception:
+            results.append({
+                "month": month_str,
+                "label": f"{month_labels_es[target.month - 1]} {str(target.year)[-2:]}",
+                "ventas": 0.0,
+                "costos": 0.0,
+                "utilidad": 0.0,
+            })
+
+    return results
+
+@app.get('/api/summary/logistics-kpis')
+def get_logistics_kpis(month: str, db: Session = Depends(get_db)):
+    """
+    Returns the raw logistics tracking counts for the selected month to be displayed globally.
+    """
+    db_stat = db.query(models.MonthlyStatusCount).filter(models.MonthlyStatusCount.month == month).first()
+    if not db_stat:
+        return {
+            "entregados": 0, "devoluciones": 0, "pendientes": 0, "cancelados": 0,
+            "novedades": 0, "proceso": 0, "revisar": 0, "otros": 0, "total_pedidos": 0
+        }
+    return {
+        "entregados": db_stat.entregados,
+        "devoluciones": db_stat.devoluciones,
+        "pendientes": db_stat.pendientes,
+        "cancelados": db_stat.cancelados,
+        "novedades": db_stat.novedades,
+        "proceso": db_stat.proceso,
+        "revisar": db_stat.revisar,
+        "otros": db_stat.otros,
+        "total_pedidos": db_stat.total_pedidos
+    }
