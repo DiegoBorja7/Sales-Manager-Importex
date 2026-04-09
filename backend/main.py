@@ -36,15 +36,25 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Importex MVP Backend", version="1.0.0")
 
+import os
+
+# CORS Configuration
+allowed_origins = [
+    "http://localhost:5173", 
+    "http://localhost:5174", 
+    "http://127.0.0.1:5173", 
+    "http://127.0.0.1:5174",
+    "https://importex-app.vercel.app"
+]
+
+# Add more origins from environment variables if present
+env_origins = os.getenv("ALLOWED_ORIGINS")
+if env_origins:
+    allowed_origins.extend([origin.strip() for origin in env_origins.split(",")])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", 
-        "http://localhost:5174", 
-        "http://127.0.0.1:5173", 
-        "http://127.0.0.1:5174",
-        "https://importex-app.vercel.app"
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

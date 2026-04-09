@@ -3,7 +3,8 @@ import toast from 'react-hot-toast';
 import axios from 'axios';
 import { Save, X, Info } from 'lucide-react';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = rawApiUrl.replace(/\/+$/, '');
 
 const CATEGORIES = [
   'Logística', 

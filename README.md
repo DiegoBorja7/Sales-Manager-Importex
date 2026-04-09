@@ -107,6 +107,23 @@ npm run dev
 ```
 Abre en tu navegador la dirección indicada en la consola (Ej. `http://localhost:5173/`).
 
+## 🌐 Despliegue en Producción
+
+### Frontend (Vercel)
+1. Conecta tu repositorio a Vercel.
+2. Configura las variables de entorno en el dashboard de Vercel:
+   - `VITE_API_URL`: La URL de tu backend desplegado (ej. `https://api.tuapp.com`).
+3. El archivo `vercel.json` ya está configurado para manejar las rutas de React.
+
+### Backend (Render / Railway / Koyeb)
+1. El backend incluye un `Procfile` para despliegues automatizados.
+2. Asegúrate de configurar las variables de entorno:
+   - `DATABASE_URL`: Tu string de conexión de Neon Postgres.
+   - `ALLOWED_ORIGINS`: Una lista separada por comas de los orígenes permitidos (ej. `https://tuapp.vercel.app`).
+   - `PORT`: El puerto (usualmente manejado automáticamente por la plataforma).
+3. Comando de inicio sugerido: `gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:$PORT`
+
 ---
 
-**Nota de Producción (V0.1):** Esta versión representa la inicialización del núcleo funcional. Antes de exponer al público el sistema, es recomendable proteger los endpoints con JWT (JSON Web Tokens) en futuras iteraciones.
+**Nota de Seguridad:** En producción, asegúrate de que `DATABASE_URL` sea privada y que el CORS esté restringido únicamente a tus dominios reales.
+

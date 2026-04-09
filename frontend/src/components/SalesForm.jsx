@@ -96,7 +96,9 @@ const SalesForm = ({ onSuccess, onCancel, initialData }) => {
       
     } catch (error) {
       console.error(error);
-      toast.error('Error al registrar la venta. Revisa la conexión.');
+      const detail = error.response?.data?.detail;
+      const msg = typeof detail === 'string' ? detail : 'Error al registrar la venta. Revisa la conexión.';
+      toast.error(msg);
     } finally {
       setIsSubmitting(false);
     }
